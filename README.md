@@ -3,7 +3,7 @@
 
   <p>
     <strong>A minimalist, high-performance, go routines fabric :link:
-    for your :heart: distriubted systems :sparkles:</strong>
+    for your :heart: distributed systems :sparkles:</strong>
   </p>
 </div>
 

@@ -573,6 +573,48 @@ func (t *Transport) handleConn(conn quic.Connection) (hostCx, error) {
 		logger.Info("new peer discovered", "hostname", rsvHostname)
 	}
 
+	// We also check if we have node name conflict
+	hostInfo, ok := t.hostsInfo[rsvHostnameHandle]
+	if ok {
+		if hostInfo.Addr != peerAddr || hostInfo.Port != peerPort {
+			logger := logger.With(
+				"oldAddr", hostInfo.Addr,
+				"oldPort", hostInfo.Port,
+				"newAddr", peerAddr,
+				"newPort", peerPort,
+			)
+			logger.Warn(
+				"a node has been migrated or there is a name conflict in the cluster")
+			gcHost, stillHasConnection := t.garbageCollectCxs(rsvHostnameHandle)
+			if stillHasConnection {
+				logger.Error("connection is still active after node migration, that's a symptom of name conflict!")
+				for _, cx := range gcHost {
+					// TODO(raskyld): implement a ban list.
+					// TODO(raskyld): implement connection drain out of Shutdown()
+					QErrNameConflict.Close(
+						cx, "we detected a node name conflict in the cluster! "+
+							"this may be because you have rescheduled a node on another machine, "+
+							"if you haven't, then it could mean one of your certificate has leaked! "+
+							"if that's the case, you must revoke the certificate or add the hostname to "+
+							"the BanList config.",
+					)
+				}
+				delete(t.hostsCxs, rsvHostnameHandle)
+			}
+			t.hostsInfo[rsvHostnameHandle] = Host{
+				Name: rsvHostnameHandle,
+				Addr: peerAddr,
+				Port: peerPort,
+			}
+		}
+	} else {
+		t.hostsInfo[rsvHostnameHandle] = Host{
+			Name: rsvHostnameHandle,
+			Addr: peerAddr,
+			Port: peerPort,
+		}
+	}
+
 	// Then, we actually perform the connection update
 	// after a pass of garbage collection.
 	hcx := hostCx{

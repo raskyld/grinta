@@ -35,6 +35,10 @@ var (
 		Code:   0x3,
 		Prefix: "shutdown",
 	}
+	QErrNameConflict = QuicApplicationError{
+		Code:   0x4,
+		Prefix: "name conflict",
+	}
 )
 
 type QuicApplicationError struct {

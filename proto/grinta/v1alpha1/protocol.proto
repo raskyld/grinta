@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package grinta.v1alpha1;
+
+option go_package = "github.com/raskyld/grinta/gen/grinta/v1alpha1;grintav1alpha1";
+
+// Frame is the actual data transported over the QUIC streams.
+message Frame {
+  oneof type {
+    InitFrame init = 1;
+    bytes data = 2;
+  }
+}
+
+// InitFrame is expected to be the first frame received when a stream is
+// open.
+message InitFrame {
+  StreamMode mode = 1;
+  string dest_name = 2;
+  string src_name = 3;
+}
+
+// StreamMode describes whether a stream is used for internal
+// purpose or if it directly maps to a user flow.
+enum StreamMode {
+  STREAM_MODE_UNSPECIFIED = 0;
+  STREAM_MODE_GOSSIP = 1;
+  STREAM_MODE_FLOW = 2;
+}

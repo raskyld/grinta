@@ -16,6 +16,7 @@ var (
 	ErrUdpNotAvailable = errors.New("transport: UDP listener not available")
 	ErrShutdown        = errors.New("transport: shutting down")
 	ErrStreamWrite     = errors.New("transport: error writing to a stream")
+	ErrNoTLSConfig     = errors.New("transport: TlsConfig is required")
 )
 
 var (

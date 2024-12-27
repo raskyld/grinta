@@ -8,15 +8,17 @@ import (
 )
 
 var (
-	ErrHostnameInvalid = errors.New("fabric: node name is not valid")
-	ErrNameInvalid     = errors.New("goroutinette: name is not valid")
-	ErrBufferSize      = errors.New("transport: could not allocate udp buffer")
-	ErrHostnameResolve = errors.New("transport: could not resolve hostname from certificate")
-	ErrInvalidAddr     = errors.New("transport: the IP you provided is invalid")
-	ErrUdpNotAvailable = errors.New("transport: UDP listener not available")
-	ErrShutdown        = errors.New("transport: shutting down")
-	ErrStreamWrite     = errors.New("transport: error writing to a stream")
-	ErrNoTLSConfig     = errors.New("transport: TlsConfig is required")
+	ErrHostnameInvalid   = errors.New("fabric: node name is not valid")
+	ErrNameInvalid       = errors.New("goroutinette: name is not valid")
+	ErrBufferSize        = errors.New("transport: could not allocate udp buffer")
+	ErrHostnameResolve   = errors.New("transport: could not resolve hostname from certificate")
+	ErrInvalidAddr       = errors.New("transport: the IP you provided is invalid")
+	ErrUdpNotAvailable   = errors.New("transport: UDP listener not available")
+	ErrShutdown          = errors.New("transport: shutting down")
+	ErrStreamWrite       = errors.New("transport: error writing to a stream")
+	ErrProtocolViolation = errors.New("transport: protocol violation")
+	ErrNoTLSConfig       = errors.New("transport: TlsConfig is required")
+	ErrTooLargeFrame     = errors.New("transport: frame was too large could not send")
 )
 
 var (

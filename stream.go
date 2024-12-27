@@ -4,9 +4,11 @@ import (
 	"net"
 
 	"github.com/quic-go/quic-go"
+	grintav1alpha1 "github.com/raskyld/goroutinettes/gen/grinta/v1alpha1"
 )
 
 type streamWrapper struct {
+	mode        grintav1alpha1.StreamMode
 	localAddr   net.Addr
 	remoteAddr  net.Addr
 	source      string

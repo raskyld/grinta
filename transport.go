@@ -56,7 +56,12 @@ type TransportConfig struct {
 	MetricSink metrics.MetricSink
 
 	// DialTimeout controls how much time we wait for stream establishment.
+	// Default to 10 seconds.
 	DialTimeout time.Duration
+
+	// GracePeriod is how much time we accept to wait for stream buffers to
+	// get flushed. Default to 10 seconds.
+	GracePeriod time.Duration
 
 	// LogHandler to use for emitting structured logs.
 	LogHandler slog.Handler
@@ -83,8 +88,9 @@ type Transport struct {
 	streamCh chan net.Conn
 
 	// QUIC layer
-	tr *quic.Transport
-	ln *quic.Listener
+	tr    *quic.Transport
+	ln    *quic.Listener
+	qconf *quic.Config
 
 	// UDP layer
 	udpLn *net.UDPConn
@@ -96,12 +102,12 @@ type hostCx struct {
 	quic.Connection
 }
 
-func NewTransport(cfg *TransportConfig) (t *Transport, err error) {
+func NewTransport(cfg *TransportConfig) (trans *Transport, err error) {
 	if cfg.TlsConfig == nil {
 		return nil, ErrNoTLSConfig
 	}
 
-	t = &Transport{
+	t := &Transport{
 		cfg:        cfg,
 		flowCh:     make(chan *streamWrapper),
 		AddrToHost: make(map[string]unique.Handle[Hostname]),
@@ -121,6 +127,14 @@ func NewTransport(cfg *TransportConfig) (t *Transport, err error) {
 		t.msink = metrics.Default()
 	} else {
 		t.msink = cfg.MetricSink
+	}
+
+	if cfg.DialTimeout == 0 {
+		cfg.DialTimeout = 10 * time.Second
+	}
+
+	if cfg.GracePeriod == 0 {
+		cfg.GracePeriod = 10 * time.Second
 	}
 
 	defer func() {
@@ -151,12 +165,9 @@ func NewTransport(cfg *TransportConfig) (t *Transport, err error) {
 		requested = defaultUDPBufferSize
 	}
 
-	if err := t.negociateBufferSize(requested); err != nil {
-		return nil, err
-	}
-
 	t.tr = &quic.Transport{
-		Conn: udpLn,
+		Conn:                             udpLn,
+		DisableVersionNegotiationPackets: true,
 	}
 
 	hintFlow := cfg.HintMaxFlows
@@ -164,7 +175,7 @@ func NewTransport(cfg *TransportConfig) (t *Transport, err error) {
 		hintFlow = 10000
 	}
 
-	ln, err := t.tr.Listen(t.cfg.TlsConfig, &quic.Config{
+	t.qconf = &quic.Config{
 		Versions:        []quic.Version{quic.Version2, quic.Version1},
 		EnableDatagrams: true,
 		// TODO(raskyld): as a later optimisation, we may accept
@@ -178,13 +189,17 @@ func NewTransport(cfg *TransportConfig) (t *Transport, err error) {
 		MaxIncomingStreams:    hintFlow,
 		MaxIncomingUniStreams: hintFlow,
 		MaxIdleTimeout:        1 * time.Minute,
-	})
+		HandshakeIdleTimeout:  5 * time.Minute,
+	}
+
+	ln, err := t.tr.Listen(t.cfg.TlsConfig, t.qconf)
 	if err != nil {
 		return nil, fmt.Errorf("transport: failed to allocate QUIC listener: %w", err)
 	}
 
 	t.ln = ln
-	return
+	go t.acceptCx()
+	return t, err
 }
 
 func (t *Transport) FinalAdvertiseAddr(_ string, _ int) (net.IP, int, error) {
@@ -194,7 +209,7 @@ func (t *Transport) FinalAdvertiseAddr(_ string, _ int) (net.IP, int, error) {
 
 	ipPort := strings.Split(t.udpLn.LocalAddr().String(), ":")
 	if len(ipPort) != 2 {
-		panic(fmt.Sprintf("go runtime produced invalid udp addr", t.udpLn.LocalAddr().String()))
+		panic(fmt.Sprintf("go runtime produced invalid udp addr: %s", t.udpLn.LocalAddr().String()))
 	}
 
 	ip := ipPort[0]
@@ -222,25 +237,27 @@ func (t *Transport) WriteTo(b []byte, addr string) (time.Time, error) {
 }
 
 func (t *Transport) WriteToAddress(b []byte, addr memberlist.Address) (time.Time, error) {
-	ctx, _ := context.WithTimeout(context.Background(), t.cfg.DialTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), t.cfg.DialTimeout)
+	defer cancel()
 	conn, err := t.getActiveCx(ctx, addr)
 	if err != nil {
 		return time.Time{}, err
 	}
 
-	ts := time.Now()
+	mLabels := append(t.cfg.MetricLabels, LabelPeerAddr.M(addr.Addr), LabelPeerName.M(addr.Name))
 	err = conn.SendDatagram(b)
+	ts := time.Now()
 	if err == nil {
 		t.msink.IncrCounterWithLabels(
 			MetricGrintaDatagramOutBytes,
 			float32(len(b)),
-			append(t.cfg.MetricLabels, LabelsForAddr(addr)...),
+			mLabels,
 		)
 	} else {
 		t.msink.IncrCounterWithLabels(
 			MetricGrintaDatagramOutErrorCount,
 			1.0,
-			append(t.cfg.MetricLabels, LabelsForAddr(addr)...),
+			mLabels,
 		)
 	}
 	return ts, err
@@ -257,71 +274,32 @@ func (t *Transport) DialTimeout(addr string, timeout time.Duration) (net.Conn, e
 }
 
 func (t *Transport) DialAddressTimeout(addr memberlist.Address, timeout time.Duration) (net.Conn, error) {
-	ctx, _ := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	hcx, err := t.getActiveCx(ctx, addr)
+	mLabels := append(t.cfg.MetricLabels, LabelPeerAddr.M(addr.Addr), LabelPeerName.M(addr.Name))
 	if err != nil {
-		mLabels := append(t.cfg.MetricLabels, metrics.Label{Name: MLabelError, Value: "no_conn_to_host"})
-		mLabels = append(mLabels, LabelsForAddr(addr)...)
 		t.msink.IncrCounterWithLabels(
 			MetricGrintaStreamEstOutErrorCount,
 			1.0,
-			mLabels,
+			append(mLabels, LabelError.M("no_conn_to_host")),
 		)
 		return nil, err
 	}
 
 	stream, err := hcx.OpenStreamSync(ctx)
 	if err != nil {
-		mLabels := append(t.cfg.MetricLabels, metrics.Label{Name: MLabelError, Value: "cannot_open_stream"})
-		mLabels = append(mLabels, LabelsForAddr(addr)...)
 		t.msink.IncrCounterWithLabels(
 			MetricGrintaStreamEstOutErrorCount,
 			1.0,
-			mLabels,
+			append(mLabels, LabelError.M("cannot_open_stream")),
 		)
 		return nil, err
 	}
 
-	swrap := &streamWrapper{
-		localAddr:  hcx.LocalAddr(),
-		remoteAddr: hcx.RemoteAddr(),
-		Stream:     stream,
-	}
-
-	go swrap.garbageCollector(hcx.closeCh)
-	initFrame := &grintav1alpha1.Frame{
-		Type: &grintav1alpha1.Frame_Init{
-			Init: &grintav1alpha1.InitFrame{
-				Mode: grintav1alpha1.StreamMode_STREAM_MODE_GOSSIP,
-			},
-		},
-	}
-
-	buf, err := proto.Marshal(initFrame)
-	if err != nil {
-		// this is a software critical error, it should never happen
-		panic(err)
-	}
-
-	_, err = stream.Write(buf)
-	if err != nil {
-		mLabels := append(t.cfg.MetricLabels, metrics.Label{Name: MLabelError, Value: "cannot_send_init_frame"})
-		mLabels = append(mLabels, LabelsForAddr(addr)...)
-		t.msink.IncrCounterWithLabels(
-			MetricGrintaStreamEstOutErrorCount,
-			1.0,
-			mLabels,
-		)
-		return nil, fmt.Errorf("%w: %w", ErrStreamWrite, err)
-	}
-
-	mLabels := append(t.cfg.MetricLabels, LabelsForAddr(addr)...)
-	t.msink.IncrCounterWithLabels(
-		MetricGrintaStreamEstOutCount,
-		1.0,
-		mLabels,
-	)
-	return swrap, nil
+	return t.initialiseOutboundStream(ctx, stream, hcx, &grintav1alpha1.InitFrame{
+		Mode: grintav1alpha1.StreamMode_STREAM_MODE_GOSSIP,
+	})
 }
 
 func (t *Transport) StreamCh() <-chan net.Conn {
@@ -344,7 +322,7 @@ func (t *Transport) Shutdown() error {
 
 	// dumb SO_LINGER like behaviour until it is implemented
 	// in go-quic
-	time.Sleep(10 * time.Second)
+	time.Sleep(t.cfg.GracePeriod)
 
 	t.hostsLock.Lock()
 	for _, cxs := range t.hostsCxs {
@@ -364,29 +342,6 @@ func (t *Transport) Shutdown() error {
 	return nil
 }
 
-func (t *Transport) negociateBufferSize(requested int) error {
-	size := requested
-	for size > 0 {
-		if err := t.udpLn.SetReadBuffer(size); err != nil {
-			if t.cfg.EnforceBufferSize {
-				return ErrBufferSize
-			}
-			size = size >> 1
-			continue
-		}
-		if size != requested {
-			t.logger.Warn("using smaller than expected UDP buffer", "bytes", size)
-		}
-		t.msink.SetGaugeWithLabels(
-			MetricGrintaUDPBufferSizeBytes,
-			float32(size),
-			t.cfg.MetricLabels,
-		)
-		return nil
-	}
-	return ErrBufferSize
-}
-
 func (t *Transport) acceptCx() {
 	for {
 		conn, err := t.ln.Accept(context.TODO())
@@ -401,7 +356,7 @@ func (t *Transport) acceptCx() {
 			}
 		}
 
-		t.handleConn(conn)
+		t.handleConn(conn, true)
 	}
 }
 
@@ -409,24 +364,27 @@ func (t *Transport) waitForDatagrams(hcx hostCx) {
 	remoteAddr := hcx.RemoteAddr()
 	ctx := hcx.Context()
 	logger := t.logger.With("remote", remoteAddr)
-	mLabels := append(t.cfg.MetricLabels, metrics.Label{Name: MLabelPeerAddr, Value: remoteAddr.String()})
-
+	mLabels := append(t.cfg.MetricLabels, LabelPeerAddr.M(remoteAddr.String()))
 	for {
 		buf, err := hcx.ReceiveDatagram(ctx)
 		ts := time.Now()
 		if t.gracefulTerm.Load() {
-			logger.Debug("datagram listener gracefully shutting down")
 			break
 		}
 
 		if err != nil {
 			if ctx.Err() != nil {
+				t.msink.IncrCounterWithLabels(
+					MetricGrintaDatagramInErrorCount,
+					1.0,
+					append(mLabels, LabelError.M("connection_broken")),
+				)
 				break
 			}
 			t.msink.IncrCounterWithLabels(
 				MetricGrintaDatagramInErrorCount,
 				1.0,
-				append(mLabels, metrics.Label{Name: MLabelError, Value: "unknown"}),
+				append(mLabels, LabelError.M("transient")),
 			)
 			logger.Error("error reading UDP packet", "error", err)
 			continue
@@ -437,7 +395,7 @@ func (t *Transport) waitForDatagrams(hcx hostCx) {
 			t.msink.IncrCounterWithLabels(
 				MetricGrintaDatagramInErrorCount,
 				1.0,
-				append(mLabels, metrics.Label{Name: MLabelError, Value: "too_small"}),
+				append(mLabels, LabelError.M("too_small")),
 			)
 			logger.Error("received a too short udp packet", "length", n)
 			continue
@@ -456,121 +414,52 @@ func (t *Transport) handleStreams(hcx hostCx) {
 	remoteAddr := hcx.RemoteAddr()
 	ctx := hcx.Context()
 	logger := t.logger.With("remote", remoteAddr)
-	mLabels := append(t.cfg.MetricLabels, metrics.Label{Name: MLabelPeerAddr, Value: remoteAddr.String()})
+	mLabels := append(t.cfg.MetricLabels, LabelPeerAddr.M(remoteAddr.String()))
 
 	for {
 		stream, err := hcx.AcceptStream(ctx)
 		if t.gracefulTerm.Load() {
-			logger.Debug("stream listener gracefully shutting down")
 			break
 		}
 
 		if err != nil {
-			logger.Warn("error accepting stream", "error", err)
 			if ctx.Err() != nil {
-				logger.Error("connection was broken", "error", ctx.Err())
-				break
-			}
-			t.msink.IncrCounterWithLabels(
-				MetricGrintaStreamEstInErrorCount,
-				1.0,
-				append(mLabels, metrics.Label{Name: MLabelError, Value: "unknown"}),
-			)
-			continue
-		}
-
-		logger = logger.With("stream_id", stream.StreamID())
-		logger.Debug("received a stream request")
-
-		swrap := &streamWrapper{
-			localAddr:  hcx.LocalAddr(),
-			remoteAddr: hcx.RemoteAddr(),
-			Stream:     stream,
-		}
-
-		// When a connection should be closed, it will first
-		// close its `closeCh` channel and wait for its streams
-		// to finish draining their buffers.
-		// Sadly, atm, go-quic has no public API to see if the drain
-		// is over, so we will implement a dumb "wait X seconds" before
-		// closing the connection itself.
-		go swrap.garbageCollector(hcx.closeCh)
-
-		buf := make([]byte, 0, 64)
-		_, err = stream.Read(buf)
-		if t.gracefulTerm.Load() {
-			logger.Debug("stream listener gracefully shutting down")
-			break
-		}
-
-		if err != nil {
-			if serr := swrap.Context().Err(); serr != nil {
-				logger.Warn("stream was broken", "error", serr)
+				logger.Warn("connection was broken", LabelError.L(ctx.Err()))
 				t.msink.IncrCounterWithLabels(
 					MetricGrintaStreamEstInErrorCount,
 					1.0,
-					append(mLabels, metrics.Label{Name: MLabelError, Value: "stream_broken"}),
+					append(mLabels, LabelError.M("connection_broken")),
 				)
+				break
 			}
-			t.msink.IncrCounterWithLabels(
-				MetricGrintaStreamEstInErrorCount,
-				1.0,
-				append(mLabels, metrics.Label{Name: MLabelError, Value: "no_init_frame"}),
-			)
-			logger.Error("error waiting for stream init frame", "error", err)
-			continue
-		}
 
-		var frame grintav1alpha1.Frame
-		err = proto.Unmarshal(buf, &frame)
-		if err != nil {
-			logger.Warn("grinta protocol violation: malformed frame", "error", err)
-			stream.CancelRead(QErrStreamProtocolViolation)
-			stream.CancelWrite(QErrStreamProtocolViolation)
+			logger.Warn("transient error accepting stream", LabelError.L(err))
 			t.msink.IncrCounterWithLabels(
 				MetricGrintaStreamEstInErrorCount,
 				1.0,
-				append(mLabels, metrics.Label{Name: MLabelError, Value: "protocol_violation"}),
+				append(mLabels, LabelError.M("transient")),
 			)
 			continue
 		}
 
-		initFrame, ok := frame.Type.(*grintav1alpha1.Frame_Init)
-		if !ok {
-			logger.Warn("grinta protocol violation: first frame is not init one")
-			stream.CancelRead(QErrStreamProtocolViolation)
-			stream.CancelWrite(QErrStreamProtocolViolation)
-			t.msink.IncrCounterWithLabels(
-				MetricGrintaStreamEstInErrorCount,
-				1.0,
-				append(mLabels, metrics.Label{Name: MLabelError, Value: "protocol_violation"}),
-			)
-			continue
-		}
+		// NB: we offload the stream establishment in another goroutine to avoid
+		// a misbehaving peer from blocking us.
+		go func() {
+			initCtx, cancel := context.WithTimeout(ctx, t.cfg.DialTimeout)
+			defer cancel()
+			swrap, err := t.initialiseInboundStream(initCtx, stream, hcx)
+			if err != nil {
+				logger.Error("failed to establish stream", LabelError.L(err))
+				return
+			}
 
-		switch initFrame.Init.Mode {
-		case grintav1alpha1.StreamMode_STREAM_MODE_UNSPECIFIED:
-			logger.Warn("grinta protocol violation: unknown mode")
-			stream.CancelRead(QErrStreamProtocolViolation)
-			stream.CancelWrite(QErrStreamProtocolViolation)
-			t.msink.IncrCounterWithLabels(
-				MetricGrintaStreamEstInErrorCount,
-				1.0,
-				append(mLabels, metrics.Label{Name: MLabelError, Value: "protocol_violation"}),
-			)
-		case grintav1alpha1.StreamMode_STREAM_MODE_GOSSIP:
-			mLabels := append(mLabels, metrics.Label{Name: MLabelStreamMode, Value: "gossip"})
-			t.msink.IncrCounterWithLabels(
-				MetricGrintaStreamEstInCount, 1.0, mLabels)
-			t.streamCh <- swrap
-		case grintav1alpha1.StreamMode_STREAM_MODE_FLOW:
-			mLabels := append(mLabels, metrics.Label{Name: MLabelStreamMode, Value: "flow"})
-			t.msink.IncrCounterWithLabels(
-				MetricGrintaStreamEstInCount, 1.0, mLabels)
-			swrap.source = initFrame.Init.GetSrcName()
-			swrap.destination = initFrame.Init.GetDestName()
-			t.flowCh <- swrap
-		}
+			switch swrap.mode {
+			case grintav1alpha1.StreamMode_STREAM_MODE_GOSSIP:
+				t.streamCh <- swrap
+			case grintav1alpha1.StreamMode_STREAM_MODE_FLOW:
+				t.flowCh <- swrap
+			}
+		}()
 	}
 }
 
@@ -607,20 +496,22 @@ func (t *Transport) dial(ctx context.Context, target string) (hostCx, error) {
 		return hostCx{}, fmt.Errorf("%w: %w", ErrInvalidAddr, err)
 	}
 
-	cx, err := t.tr.Dial(ctx, addr, t.cfg.TlsConfig, nil)
+	cx, err := t.tr.Dial(ctx, addr, t.cfg.TlsConfig, t.qconf)
 	if t.gracefulTerm.Load() {
 		return hostCx{}, ErrShutdown
 	}
 	if err != nil {
+		t.logger.Warn("failed to dial", LabelPeerAddr.L(target))
 		return hostCx{}, err
 	}
 
-	return t.handleConn(cx)
+	return t.handleConn(cx, false)
 }
 
 // not thread safe!
 // must be called by an holder of Write lock
 func (t *Transport) garbageCollectCxs(dest unique.Handle[Hostname]) ([]hostCx, bool) {
+	logger := t.logger.With(LabelPeerName.L(dest.Value()))
 	cxs, hasCxs := t.hostsCxs[dest]
 	if !hasCxs {
 		return cxs, hasCxs
@@ -635,11 +526,15 @@ func (t *Transport) garbageCollectCxs(dest unique.Handle[Hostname]) ([]hostCx, b
 
 	if len(cleanedUpList) == 0 {
 		delete(t.hostsCxs, dest)
+		logger.Debug("finished connection gc: all connections are now dead")
 		return nil, false
 	} else {
 		t.hostsCxs[dest] = cleanedUpList
 	}
 
+	if len(cleanedUpList) != len(cxs) {
+		logger.Debug("finished connection gc: remaining connections", "remaining", len(cleanedUpList))
+	}
 	return cleanedUpList, true
 }
 
@@ -660,7 +555,7 @@ func (t *Transport) firstActiveCx(dest unique.Handle[Hostname]) (hostCx, bool) {
 	return hostCx{}, false
 }
 
-func (t *Transport) handleConn(conn quic.Connection) (hostCx, error) {
+func (t *Transport) handleConn(conn quic.Connection, inbound bool) (hostCx, error) {
 	peer := conn.RemoteAddr().String()
 	peerAddrPort := strings.Split(peer, ":")
 	if len(peerAddrPort) != 2 {
@@ -672,13 +567,12 @@ func (t *Transport) handleConn(conn quic.Connection) (hostCx, error) {
 		panic(err)
 	}
 
-	logger := t.logger.With("addr", peerAddr, "port", peerPort)
+	logger := t.logger.With(LabelPeerAddr.L(peer))
+	mLabels := append(t.cfg.MetricLabels, LabelPeerAddr.M(peer))
 	resolver := t.cfg.HostnameResolver
 	if resolver == nil {
 		resolver = CommonNameResolver
 	}
-
-	mLabels := append(t.cfg.MetricLabels, metrics.Label{Name: MLabelPeerAddr, Value: peer})
 
 	rsvHostname, err, uerr := resolver(conn.ConnectionState().TLS.PeerCertificates)
 	if err != nil {
@@ -686,7 +580,7 @@ func (t *Transport) handleConn(conn quic.Connection) (hostCx, error) {
 		t.msink.IncrCounterWithLabels(
 			MetricGrintaConnErrorCount,
 			1.0,
-			append(mLabels, metrics.Label{Name: MLabelError, Value: "name_resolution"}),
+			append(mLabels, LabelError.M("name_resolution")),
 		)
 		if uerr == "" {
 			QErrInternal.Close(
@@ -702,7 +596,8 @@ func (t *Transport) handleConn(conn quic.Connection) (hostCx, error) {
 		return hostCx{}, ErrHostnameResolve
 	}
 
-	mLabels = append(mLabels, metrics.Label{Name: MLabelPeerName, Value: string(rsvHostname)})
+	logger = logger.With(LabelPeerName.L(rsvHostname))
+	mLabels = append(mLabels, LabelPeerName.M(string(rsvHostname)))
 
 	rsvHostnameHandle := unique.Make(Hostname(rsvHostname))
 	t.hostsLock.Lock()
@@ -729,12 +624,12 @@ func (t *Transport) handleConn(conn quic.Connection) (hostCx, error) {
 			t.msink.IncrCounterWithLabels(
 				MetricGrintaHostNameChanges,
 				1.0,
-				append(t.cfg.MetricLabels, metrics.Label{Name: MLabelPeerAddr, Value: peer}),
+				append(t.cfg.MetricLabels, LabelPeerAddr.M(peer)),
 			)
 		}
 	} else {
 		t.AddrToHost[peer] = rsvHostnameHandle
-		logger.Info("new peer discovered", "hostname", rsvHostname)
+		logger.Info("new peer discovered")
 	}
 
 	// We also check if we have node name conflict
@@ -747,34 +642,36 @@ func (t *Transport) handleConn(conn quic.Connection) (hostCx, error) {
 				"newAddr", peerAddr,
 				"newPort", peerPort,
 			)
-			logger.Warn(
-				"a node has been migrated or there is a name conflict in the cluster")
+			logger.Warn("a node has been migrated or there is a name conflict in the cluster")
 			t.msink.IncrCounterWithLabels(
 				MetricGrintaHostNameChanges,
 				1.0,
-				append(t.cfg.MetricLabels, metrics.Label{Name: MLabelPeerName, Value: string(rsvHostname)}),
+				append(t.cfg.MetricLabels, LabelPeerName.M(string(rsvHostname))),
 			)
+
 			gcHost, stillHasConnection := t.garbageCollectCxs(rsvHostnameHandle)
 			if stillHasConnection {
-				logger.Error("connection is still active after node migration, that's a symptom of name conflict!")
+				msg := "we detected a node name conflict in the cluster! " +
+					"this may be because you have rescheduled a node on another machine, " +
+					"if you haven't, then it could mean one of your certificate has leaked! " +
+					"if that's the case, you must revoke the certificate or add the hostname to " +
+					"the BanList config."
+
+				logger.Error(msg)
 				t.msink.IncrCounterWithLabels(
 					MetricGrintaHostConflictsCount,
 					1.0,
-					append(t.cfg.MetricLabels, metrics.Label{Name: MLabelPeerAddr, Value: peer}),
+					append(t.cfg.MetricLabels, LabelPeerAddr.M(peer)),
 				)
+
 				for _, cx := range gcHost {
 					// TODO(raskyld): implement a ban list.
 					// TODO(raskyld): implement connection drain out of Shutdown()
-					QErrNameConflict.Close(
-						cx, "we detected a node name conflict in the cluster! "+
-							"this may be because you have rescheduled a node on another machine, "+
-							"if you haven't, then it could mean one of your certificate has leaked! "+
-							"if that's the case, you must revoke the certificate or add the hostname to "+
-							"the BanList config.",
-					)
+					QErrNameConflict.Close(cx, msg)
 				}
 				delete(t.hostsCxs, rsvHostnameHandle)
 			}
+
 			t.hostsInfo[rsvHostnameHandle] = Host{
 				Name: rsvHostnameHandle,
 				Addr: peerAddr,
@@ -805,8 +702,204 @@ func (t *Transport) handleConn(conn quic.Connection) (hostCx, error) {
 		mLabels,
 	)
 
+	logger.Info("new connection established", "inbound", inbound)
+
 	// NB: it's ok to pass by value, the struct is just two cheap pointers.
 	go t.waitForDatagrams(hcx)
 	go t.handleStreams(hcx)
 	return hcx, nil
+}
+
+func (t *Transport) initialiseOutboundStream(
+	ctx context.Context,
+	stream quic.Stream,
+	hcx hostCx,
+	initFrame *grintav1alpha1.InitFrame,
+) (*streamWrapper, error) {
+	peerAddr := hcx.Connection.RemoteAddr().String()
+	logger := t.logger.With(
+		LabelStreamID.L(stream.StreamID()),
+		LabelPeerAddr.L(peerAddr),
+	)
+	mLabels := append(
+		t.cfg.MetricLabels,
+		LabelPeerAddr.M(peerAddr),
+	)
+
+	logger.Debug("initiating outbound stream")
+	swrap := &streamWrapper{
+		localAddr:  hcx.LocalAddr(),
+		remoteAddr: hcx.RemoteAddr(),
+		Stream:     stream,
+	}
+
+	go swrap.garbageCollector(hcx.closeCh)
+	frame := &grintav1alpha1.Frame{
+		Type: &grintav1alpha1.Frame_Init{
+			Init: initFrame,
+		},
+	}
+
+	buf, err := proto.Marshal(frame)
+	if err != nil {
+		logger.Error("unexpected failure to marhsal a protobuf message", LabelError.L(err))
+		return nil, err
+	}
+
+	dl, ok := ctx.Deadline()
+	if ok {
+		stream.SetWriteDeadline(dl)
+	}
+
+	n, err := stream.Write(buf)
+	if err != nil {
+		mLabels := append(
+			mLabels,
+			LabelError.M("cannot_send_init_frame"),
+		)
+		t.msink.IncrCounterWithLabels(
+			MetricGrintaStreamEstOutErrorCount,
+			1.0,
+			mLabels,
+		)
+		return nil, fmt.Errorf("%w: %w", ErrStreamWrite, err)
+	}
+
+	if n != len(buf) {
+		logger.Error(
+			"unexpected mismatch between frame size and bytes written",
+			"expected", len(buf),
+			"actual", n,
+			LabelError.L(ErrTooLargeFrame),
+		)
+
+		mLabels := append(
+			mLabels,
+			LabelError.M("init_frame_too_large"),
+		)
+		t.msink.IncrCounterWithLabels(
+			MetricGrintaStreamEstOutErrorCount,
+			1.0,
+			mLabels,
+		)
+
+		return nil, ErrTooLargeFrame
+	}
+
+	t.msink.IncrCounterWithLabels(
+		MetricGrintaStreamEstOutCount,
+		1.0,
+		append(
+			mLabels,
+			LabelError.M("cannot_send_init_frame"),
+		),
+	)
+	return swrap, nil
+}
+
+func (t *Transport) initialiseInboundStream(
+	ctx context.Context,
+	stream quic.Stream,
+	hcx hostCx,
+) (*streamWrapper, error) {
+	peerAddr := hcx.Connection.RemoteAddr().String()
+	logger := t.logger.With(
+		LabelStreamID.L(stream.StreamID()),
+		LabelPeerAddr.L(peerAddr),
+	)
+	mLabels := append(
+		t.cfg.MetricLabels,
+		LabelPeerAddr.M(peerAddr),
+	)
+
+	logger.Debug("initiating outbound stream")
+	swrap := &streamWrapper{
+		localAddr:  hcx.LocalAddr(),
+		remoteAddr: hcx.RemoteAddr(),
+		Stream:     stream,
+	}
+
+	go swrap.garbageCollector(hcx.closeCh)
+
+	dl, ok := ctx.Deadline()
+	if ok {
+		stream.SetReadDeadline(dl)
+	}
+
+	buf := make([]byte, 1200)
+	var n int
+	for {
+		m, err := stream.Read(buf)
+		if t.gracefulTerm.Load() {
+			return nil, ErrShutdown
+		}
+
+		if err != nil {
+			if serr := stream.Context().Err(); serr != nil {
+				logger.Warn("stream was broken", LabelError.L(serr))
+				t.msink.IncrCounterWithLabels(
+					MetricGrintaStreamEstInErrorCount,
+					1.0,
+					append(mLabels, LabelError.M("stream_broken")),
+				)
+				return nil, serr
+			}
+
+			if ctx.Err() != nil {
+				t.msink.IncrCounterWithLabels(
+					MetricGrintaStreamEstInErrorCount,
+					1.0,
+					append(mLabels, LabelError.M("stream_read_timeout")),
+				)
+				return nil, ctx.Err()
+			}
+
+			logger.Warn("transient error reading stream", LabelError.L(err))
+			continue
+		}
+
+		if m > 0 {
+			n = m
+			break
+		}
+
+		logger.Debug("received an empty frame from stream")
+	}
+
+	var frame grintav1alpha1.Frame
+	err := proto.Unmarshal(buf[:n], &frame)
+	if err != nil {
+		logger.Warn("grinta protocol violation: malformed frame", "error", err)
+		stream.CancelRead(QErrStreamProtocolViolation)
+		stream.CancelWrite(QErrStreamProtocolViolation)
+		t.msink.IncrCounterWithLabels(
+			MetricGrintaStreamEstInErrorCount,
+			1.0,
+			append(mLabels, LabelError.M("protocol_violation")),
+		)
+		return nil, ErrProtocolViolation
+	}
+
+	initFrame, ok := frame.Type.(*grintav1alpha1.Frame_Init)
+	if !ok || initFrame.Init == nil {
+		logger.Warn("grinta protocol violation: first frame is not init one")
+		stream.CancelRead(QErrStreamProtocolViolation)
+		stream.CancelWrite(QErrStreamProtocolViolation)
+		t.msink.IncrCounterWithLabels(
+			MetricGrintaStreamEstInErrorCount,
+			1.0,
+			append(mLabels, LabelError.M("protocol_violation")),
+		)
+		return nil, ErrProtocolViolation
+	}
+
+	swrap.mode = initFrame.Init.Mode
+	swrap.destination = initFrame.Init.GetDestName()
+	swrap.source = initFrame.Init.GetSrcName()
+	t.msink.IncrCounterWithLabels(
+		MetricGrintaStreamEstInCount,
+		1.0,
+		append(mLabels, LabelStreamMode.M(swrap.mode.String())),
+	)
+	return swrap, nil
 }

@@ -1,8 +1,9 @@
 package goroutinettes
 
 import (
+	"log/slog"
+
 	"github.com/hashicorp/go-metrics"
-	"github.com/hashicorp/memberlist"
 )
 
 var (
@@ -24,16 +25,23 @@ var (
 	MetricGrintaHostConflictsCount     = []string{"grinta", "host", "name", "conflicts", "count"}
 )
 
+type TelemetryLabel string
+
 var (
-	MLabelError      = "error"
-	MLabelPeerAddr   = "peer_addr"
-	MLabelPeerName   = "peer_name"
-	MLabelStreamMode = "stream_mode"
+	LabelError      TelemetryLabel = "error"
+	LabelPeerAddr   TelemetryLabel = "peer_addr"
+	LabelPeerName   TelemetryLabel = "peer_name"
+	LabelStreamMode TelemetryLabel = "stream_mode"
+	LabelStreamID   TelemetryLabel = "stream_id"
 )
 
-func LabelsForAddr(addr memberlist.Address) []metrics.Label {
-	return []metrics.Label{
-		metrics.Label{Name: MLabelPeerAddr, Value: addr.Addr},
-		metrics.Label{Name: MLabelPeerName, Value: addr.Name},
+func (lab TelemetryLabel) M(val string) metrics.Label {
+	return metrics.Label{Name: string(lab), Value: val}
+}
+
+func (lab TelemetryLabel) L(val any) slog.Attr {
+	return slog.Attr{
+		Key:   string(lab),
+		Value: slog.AnyValue(val),
 	}
 }

@@ -48,7 +48,7 @@ type TransportConfig struct {
 	DialTimeout time.Duration
 
 	// GracePeriod is how much time we accept to wait for stream buffers to
-	// get flushed. Default to 10 seconds.
+	// get flushed. Default to 2 seconds.
 	GracePeriod time.Duration
 
 	// LogHandler to use for emitting structured logs.
@@ -125,7 +125,7 @@ func NewTransport(cfg *TransportConfig) (trans *Transport, err error) {
 	}
 
 	if cfg.GracePeriod == 0 {
-		cfg.GracePeriod = 10 * time.Second
+		cfg.GracePeriod = 2 * time.Second
 	}
 
 	defer func() {
@@ -223,6 +223,10 @@ func (t *Transport) WriteTo(b []byte, addr string) (time.Time, error) {
 }
 
 func (t *Transport) WriteToAddress(b []byte, addr memberlist.Address) (time.Time, error) {
+	if t.gracefulTerm.Load() {
+		return time.Time{}, ErrShutdown
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), t.cfg.DialTimeout)
 	defer cancel()
 	conn, err := t.getActiveCx(ctx, addr)
@@ -267,6 +271,10 @@ func (t *Transport) DialTimeout(addr string, timeout time.Duration) (net.Conn, e
 }
 
 func (t *Transport) DialAddressTimeout(addr memberlist.Address, timeout time.Duration) (net.Conn, error) {
+	if t.gracefulTerm.Load() {
+		return nil, ErrShutdown
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	hcx, err := t.getActiveCx(ctx, addr)
@@ -300,6 +308,7 @@ func (t *Transport) StreamCh() <-chan net.Conn {
 	return t.streamCh
 }
 
+// Shutdown initiate a graceful termination.
 func (t *Transport) Shutdown() error {
 	if !t.gracefulTerm.CompareAndSwap(false, true) {
 		// no-op because it was already shutdown
@@ -340,16 +349,11 @@ func (t *Transport) Shutdown() error {
 func (t *Transport) acceptCx() {
 	for {
 		conn, err := t.ln.Accept(context.TODO())
+		if t.gracefulTerm.Load() {
+			break
+		}
 		if err != nil {
-			if !t.gracefulTerm.Load() {
-				// NB(raskyld): atm, the implementation only return errors if
-				// Close() has been called, that's why we make assumptions but
-				// that's not a good design. As the quic implementation evolve,
-				// we may implement some retry mechanisms etc.
-				t.logger.Warn("unexpected QUIC listener closure", "error", err)
-				return
-			}
-			t.logger.Debug("stop accepting new connections")
+			t.logger.Warn("unexpected QUIC listener closure", "error", err)
 			break
 		}
 

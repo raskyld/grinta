@@ -7,11 +7,11 @@ import (
 
 	leg_metrics "github.com/armon/go-metrics"
 	"github.com/hashicorp/go-metrics"
-	"github.com/hashicorp/memberlist"
+	"github.com/hashicorp/serf/serf"
 )
 
 type config struct {
-	mlCfg        *memberlist.Config
+	serfCfg      *serf.Config
 	trCfg        TransportConfig
 	logHandler   slog.Handler
 	metricLabels []metrics.Label
@@ -25,10 +25,21 @@ type Option func(*config) error
 // protocol.
 func WithListenOn(addr string, port int) Option {
 	return func(c *config) error {
-		c.mlCfg.BindAddr = addr
-		c.mlCfg.BindPort = port
+		c.serfCfg.MemberlistConfig.BindAddr = addr
+		c.serfCfg.MemberlistConfig.BindPort = port
 		c.trCfg.BindAddr = addr
 		c.trCfg.BindPort = port
+		return nil
+	}
+}
+
+// WithAdvertise specifies which UDP interface we must advertise to
+// other nodes. It defaults to Bind* values.
+func withAdvertise(addr string, port int) Option {
+	return func(c *config) error {
+		// TODO(rasyld): this is not implemented in our transport yet.
+		c.serfCfg.MemberlistConfig.AdvertiseAddr = addr
+		c.serfCfg.MemberlistConfig.AdvertisePort = port
 		return nil
 	}
 }
@@ -42,14 +53,22 @@ func WithLog(handler slog.Handler) Option {
 	}
 }
 
-// WithHostname specifies which hostname should be exposed to other
+// WithNodeName specifies which node name should be exposed to other
 // peers when joining the cluster. For a well-behaving cluster, the name
 // MUST be unique.
-func WithHostname(hostname string) Option {
+func WithNodeName(hostname string) Option {
 	return func(c *config) error {
 		if hostname != "" {
-			c.mlCfg.Name = hostname
+			c.serfCfg.NodeName = hostname
 		}
+		return nil
+	}
+}
+
+// WithNodeLabels adds labels to tag your node.
+func WithNodeLabels(labels map[string]string) Option {
+	return func(c *config) error {
+		c.serfCfg.Tags = labels
 		return nil
 	}
 }
@@ -62,9 +81,9 @@ func WithMetricLabels(labels []metrics.Label) Option {
 
 		// TODO(raskyld): Wait for the buildflag to always use the
 		// hashicorp version so we don't need to do the translation.
-		c.mlCfg.MetricLabels = make([]leg_metrics.Label, len(labels))
+		c.serfCfg.MetricLabels = make([]leg_metrics.Label, len(labels))
 		for i, label := range labels {
-			c.mlCfg.MetricLabels[i] = leg_metrics.Label{
+			c.serfCfg.MetricLabels[i] = leg_metrics.Label{
 				Name:  label.Name,
 				Value: label.Value,
 			}

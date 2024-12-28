@@ -81,7 +81,7 @@ func TestFabric(t *testing.T) {
 	}
 
 	fbNode1, err := Create(
-		WithHostname("node1"),
+		WithNodeName("node1"),
 		WithListenOn("127.0.0.1", 6021),
 		WithLog(n1handler),
 		WithTlsConfig(tcN1),
@@ -94,7 +94,7 @@ func TestFabric(t *testing.T) {
 	}
 
 	fbNode2, err := Create(
-		WithHostname("node2"),
+		WithNodeName("node2"),
 		WithListenOn("127.0.0.1", 6022),
 		WithLog(n2handler),
 		WithTlsConfig(tcN2),
@@ -117,4 +117,7 @@ func TestFabric(t *testing.T) {
 			return false
 		}, 10*time.Second, 1*time.Second)
 	})
+
+	fbNode1.Shutdown()
+	fbNode2.Shutdown()
 }

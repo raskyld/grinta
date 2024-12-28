@@ -8,8 +8,10 @@ import (
 )
 
 var (
-	ErrHostnameInvalid   = errors.New("fabric: node name is not valid")
-	ErrNameInvalid       = errors.New("goroutinette: name is not valid")
+	ErrHostnameInvalid = errors.New("fabric: node name is not valid")
+	ErrInvalidCfg      = errors.New("fabric: invalid options")
+	ErrJoinCluster     = errors.New("fabric: could not join cluster")
+
 	ErrBufferSize        = errors.New("transport: could not allocate udp buffer")
 	ErrHostnameResolve   = errors.New("transport: could not resolve hostname from certificate")
 	ErrInvalidAddr       = errors.New("transport: the IP you provided is invalid")

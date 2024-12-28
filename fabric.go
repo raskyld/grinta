@@ -3,10 +3,17 @@ package grinta
 import (
 	"fmt"
 	"log/slog"
+	"regexp"
 	"time"
 
 	"github.com/hashicorp/serf/serf"
+	grintav1alpha1 "github.com/raskyld/grinta/gen/grinta/v1alpha1"
+	"google.golang.org/protobuf/proto"
 )
+
+const MaxEndpointLength = 128
+
+var InvalidEndpointName = regexp.MustCompile(`[^A-Za-z0-9\-\.]+`)
 
 type Fabric struct {
 	config     config
@@ -127,5 +134,42 @@ func (fb *Fabric) handleEvents() {
 		}
 
 		fb.logger.Debug("event received", "event_type", event.EventType().String(), "event", event.String())
+		switch event := event.(type) {
+		case serf.UserEvent:
+			if event.Name == "name_resolve" {
+				var nameRecord grintav1alpha1.GossipFrameNameRecord
+				err := proto.Unmarshal(event.Payload, &nameRecord)
+				if err != nil {
+					fb.logger.Error("failed to unmarshal an event", LabelError.L(err))
+				} else {
+					fb.logger.Info("discovered a new endpoint", "endpoint", nameRecord.GetEndpointName(), "on", nameRecord.GetNodeName())
+				}
+			}
+		}
 	}
+}
+
+func (fb *Fabric) announceEndpoint(name string) error {
+	if !ValidateEndpointName(name) {
+		return ErrNameInvalid
+	}
+
+	var msg grintav1alpha1.GossipFrameNameRecord
+	msg.SetEndpointName(name)
+	msg.SetNodeName(fb.config.serfCfg.NodeName)
+
+	buf, err := proto.Marshal(&msg)
+	if err != nil {
+		panic("could not marshal name record")
+	}
+
+	err = fb.serf.UserEvent("name_resolve", buf, true)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func ValidateEndpointName(name string) bool {
+	return !InvalidEndpointName.MatchString(name) || len(name) <= MaxEndpointLength
 }

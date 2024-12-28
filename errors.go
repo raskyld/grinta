@@ -8,9 +8,10 @@ import (
 )
 
 var (
-	ErrHostnameInvalid = errors.New("fabric: node name is not valid")
-	ErrInvalidCfg      = errors.New("fabric: invalid options")
-	ErrJoinCluster     = errors.New("fabric: could not join cluster")
+	ErrNameInvalid = errors.New("fabric: names must only contains alphanum, dashes, dots and be less than 128 chars")
+
+	ErrInvalidCfg  = errors.New("fabric: invalid options")
+	ErrJoinCluster = errors.New("fabric: could not join cluster")
 
 	ErrBufferSize        = errors.New("transport: could not allocate udp buffer")
 	ErrHostnameResolve   = errors.New("transport: could not resolve hostname from certificate")

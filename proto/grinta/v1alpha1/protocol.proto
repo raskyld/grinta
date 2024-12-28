@@ -30,3 +30,10 @@ enum StreamMode {
   STREAM_MODE_GOSSIP = 1;
   STREAM_MODE_FLOW = 2;
 }
+
+// GossipFrameNameRecord is a mapping of an endpoint name to
+// a destination node.
+message GossipFrameNameRecord {
+  string endpoint_name = 1;
+  string node_name = 2;
+}

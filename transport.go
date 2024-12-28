@@ -290,9 +290,10 @@ func (t *Transport) DialAddressTimeout(addr memberlist.Address, timeout time.Dur
 		return nil, err
 	}
 
-	return t.initialiseOutboundStream(ctx, stream, hcx, &grintav1alpha1.InitFrame{
-		Mode: grintav1alpha1.StreamMode_STREAM_MODE_GOSSIP,
-	})
+	initFrame := &grintav1alpha1.InitFrame{}
+	initFrame.SetMode(grintav1alpha1.StreamMode_STREAM_MODE_GOSSIP)
+
+	return t.initialiseOutboundStream(ctx, stream, hcx, initFrame)
 }
 
 func (t *Transport) StreamCh() <-chan net.Conn {
@@ -600,11 +601,8 @@ func (t *Transport) initialiseOutboundStream(
 		LabelPerspective.M(ClientPerspective.String()),
 	)
 
-	frame := &grintav1alpha1.Frame{
-		Type: &grintav1alpha1.Frame_Init{
-			Init: initFrame,
-		},
-	}
+	frame := &grintav1alpha1.Frame{}
+	frame.SetInit(initFrame)
 
 	buf, err := proto.Marshal(frame)
 	if err != nil {
@@ -806,8 +804,8 @@ func (t *Transport) initialiseInboundStream(
 		return nil, ErrProtocolViolation
 	}
 
-	initFrame, ok := frame.Type.(*grintav1alpha1.Frame_Init)
-	if !ok || initFrame.Init == nil {
+	initFrame := frame.GetInit()
+	if !ok || initFrame == nil {
 		logger.Warn("grinta protocol violation: first frame is not init one")
 		stream.CancelRead(QErrStreamProtocolViolation)
 		stream.CancelWrite(QErrStreamProtocolViolation)
@@ -820,11 +818,11 @@ func (t *Transport) initialiseInboundStream(
 	}
 
 	swrap := &streamWrapper{
-		mode:        initFrame.Init.Mode,
+		mode:        initFrame.GetMode(),
 		localAddr:   hcx.LocalAddr(),
 		remoteAddr:  hcx.RemoteAddr(),
-		destination: initFrame.Init.GetDestName(),
-		source:      initFrame.Init.GetSrcName(),
+		destination: initFrame.GetDestName(),
+		source:      initFrame.GetSrcName(),
 
 		Stream: stream,
 	}

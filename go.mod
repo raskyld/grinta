@@ -8,7 +8,7 @@ require (
 	github.com/hashicorp/memberlist v0.5.1
 	github.com/quic-go/quic-go v0.48.2
 	github.com/stretchr/testify v1.9.0
-	google.golang.org/protobuf v1.35.1
+	google.golang.org/protobuf v1.36.1
 )
 
 require (

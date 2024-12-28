@@ -1,6 +1,9 @@
-syntax = "proto3";
+edition = "2023";
 
 package grinta.v1alpha1;
+
+import "google/protobuf/go_features.proto";
+option features.(pb.go).api_level = API_OPAQUE;
 
 option go_package = "github.com/raskyld/grinta/gen/grinta/v1alpha1;grintav1alpha1";
 

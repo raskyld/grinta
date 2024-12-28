@@ -38,6 +38,10 @@ func Create(opts ...Option) (*Fabric, error) {
 		fb.config.mlCfg.Logger = slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug)
 	}
 
+	mlCfg.Events = &gossip{
+		logger: fb.logger,
+	}
+
 	tr, err := NewTransport(&fb.config.trCfg)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidCfg, err)

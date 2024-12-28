@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -239,6 +240,18 @@ func TestNewTransport(t *testing.T) {
 		}
 		cancel()
 	})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		ts1.Shutdown()
+		wg.Done()
+	}()
+	go func() {
+		ts2.Shutdown()
+		wg.Done()
+	}()
+	wg.Wait()
 }
 
 func readStreamSkipEmpty(t *testing.T, ctx context.Context, stream net.Conn, buf []byte) (int, error) {

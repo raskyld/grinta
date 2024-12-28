@@ -3,6 +3,7 @@ package goroutinettes
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"github.com/hashicorp/memberlist"
 	"github.com/quic-go/quic-go"
 	grintav1alpha1 "github.com/raskyld/goroutinettes/gen/grinta/v1alpha1"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -303,6 +305,7 @@ func (t *Transport) Shutdown() error {
 		return nil
 	}
 
+	t.logger.Info("shutting down...", "gracePeriod", t.cfg.GracePeriod.String())
 	t.hostsLock.Lock()
 	for _, cxs := range t.hostsCxs {
 		for _, cx := range cxs {
@@ -345,6 +348,8 @@ func (t *Transport) acceptCx() {
 				t.logger.Warn("unexpected QUIC listener closure", "error", err)
 				return
 			}
+			t.logger.Debug("stop accepting new connections")
+			break
 		}
 
 		t.handleConn(conn, ServerPerspective)
@@ -607,12 +612,14 @@ func (t *Transport) initialiseOutboundStream(
 		return nil, err
 	}
 
+	sizeVarint := protowire.AppendVarint(nil, uint64(len(buf)))
+
 	dl, ok := ctx.Deadline()
 	if ok {
 		stream.SetWriteDeadline(dl)
 	}
 
-	n, err := stream.Write(buf)
+	vn, err := stream.Write(sizeVarint)
 	if err != nil {
 		t.msink.IncrCounterWithLabels(
 			MetricSErr,
@@ -625,11 +632,24 @@ func (t *Transport) initialiseOutboundStream(
 		return nil, fmt.Errorf("%w: %w", ErrStreamWrite, err)
 	}
 
-	if n != len(buf) {
+	bn, err := stream.Write(buf)
+	if err != nil {
+		t.msink.IncrCounterWithLabels(
+			MetricSErr,
+			1.0,
+			append(
+				mLabels,
+				LabelError.M("cannot_send_init_frame"),
+			),
+		)
+		return nil, fmt.Errorf("%w: %w", ErrStreamWrite, err)
+	}
+
+	if bn+vn != len(buf)+len(sizeVarint) {
 		logger.Error(
 			"unexpected mismatch between frame size and bytes written",
-			"expected", len(buf),
-			"actual", n,
+			"expected", len(buf)+len(sizeVarint),
+			"actual", bn+vn,
 			LabelError.L(ErrTooLargeFrame),
 		)
 		t.msink.IncrCounterWithLabels(
@@ -683,10 +703,11 @@ func (t *Transport) initialiseInboundStream(
 		stream.SetReadDeadline(dl)
 	}
 
-	buf := make([]byte, 1200)
+	// First we want to read the size to know how much we need to allocate.
+	var sizeBytes [binary.MaxVarintLen64]byte
 	var n int
 	for {
-		m, err := stream.Read(buf)
+		m, err := stream.Read(sizeBytes[n : n+1])
 		if t.gracefulTerm.Load() {
 			return nil, ErrShutdown
 		}
@@ -712,19 +733,67 @@ func (t *Transport) initialiseInboundStream(
 			}
 
 			logger.Warn("transient error reading stream", LabelError.L(err))
-			continue
 		}
 
 		if m > 0 {
-			n = m
+			byteRead := sizeBytes[n]
+			n = n + m
+			if byteRead < 0x80 {
+				// MSB is 0, end of varint.
+				break
+			}
+		}
+	}
+
+	sizeVarint, rdVarint := protowire.ConsumeVarint(sizeBytes[:n])
+	if rdVarint < 0 {
+		return nil, fmt.Errorf("%w: %w", ErrProtocolViolation, protowire.ParseError(rdVarint))
+	}
+
+	// First we want to read the size to know how much we need to allocate.
+	frameBytes := make([]byte, sizeVarint)
+	n = 0
+	for {
+		m, err := stream.Read(frameBytes[n:])
+		n = n + m
+		if t.gracefulTerm.Load() {
+			return nil, ErrShutdown
+		}
+
+		if err != nil {
+			if serr := stream.Context().Err(); serr != nil {
+				logger.Warn("stream was broken", LabelError.L(serr))
+				t.msink.IncrCounterWithLabels(
+					MetricSErr,
+					1.0,
+					append(mLabels, LabelError.M("stream_broken")),
+				)
+				return nil, serr
+			}
+
+			if ctx.Err() != nil {
+				t.msink.IncrCounterWithLabels(
+					MetricSErr,
+					1.0,
+					append(mLabels, LabelError.M("stream_read_timeout")),
+				)
+				return nil, ctx.Err()
+			}
+
+			logger.Warn("transient error reading stream", LabelError.L(err))
+		}
+
+		if uint64(n) == sizeVarint {
 			break
 		}
 
-		logger.Debug("received an empty frame from stream")
+		if err == nil && m < 1 {
+			panic("unreachable: if no bytes are written, we shouldn't have a nil error")
+		}
 	}
 
 	var frame grintav1alpha1.Frame
-	err := proto.Unmarshal(buf[:n], &frame)
+	err := proto.Unmarshal(frameBytes, &frame)
 	if err != nil {
 		logger.Warn("grinta protocol violation: malformed frame", LabelError.L(err))
 		stream.CancelRead(QErrStreamProtocolViolation)

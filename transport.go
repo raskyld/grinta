@@ -1,4 +1,4 @@
-package goroutinettes
+package grinta
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 	"github.com/hashicorp/go-metrics"
 	"github.com/hashicorp/memberlist"
 	"github.com/quic-go/quic-go"
-	grintav1alpha1 "github.com/raskyld/goroutinettes/gen/grinta/v1alpha1"
+	grintav1alpha1 "github.com/raskyld/grinta/gen/grinta/v1alpha1"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )

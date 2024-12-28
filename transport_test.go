@@ -1,4 +1,4 @@
-package goroutinettes
+package grinta
 
 import (
 	"context"

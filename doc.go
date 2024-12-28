@@ -70,4 +70,4 @@
 // [dep-gll]: https://pkg.go.dev/github.com/go-logr/logr
 // [dep-con]: https://pkg.go.dev/github.com/bufbuild/connect-go
 // [better-grpc]: https://buf.build/blog/connect-a-better-grpc
-package goroutinettes
+package grinta

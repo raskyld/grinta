@@ -1,4 +1,4 @@
-module github.com/raskyld/goroutinettes
+module github.com/raskyld/grinta
 
 go 1.23.4
 

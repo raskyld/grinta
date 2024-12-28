@@ -1,5 +1,5 @@
 <div align="center">
-  <h1><code>goroutinettes</code></h1>
+  <h1><code>grinta</code></h1>
 
   <p>
     <strong>A minimalist network fabric for your goroutines

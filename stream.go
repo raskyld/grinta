@@ -1,10 +1,10 @@
-package goroutinettes
+package grinta
 
 import (
 	"net"
 
 	"github.com/quic-go/quic-go"
-	grintav1alpha1 "github.com/raskyld/goroutinettes/gen/grinta/v1alpha1"
+	grintav1alpha1 "github.com/raskyld/grinta/gen/grinta/v1alpha1"
 )
 
 type streamWrapper struct {

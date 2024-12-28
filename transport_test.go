@@ -109,13 +109,6 @@ func TestNewTransport(t *testing.T) {
 		{Key: "emitter", Value: slog.StringValue("node2")},
 	})
 
-	n3handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level:     slog.LevelDebug,
-		AddSource: true,
-	}).WithAttrs([]slog.Attr{
-		{Key: "emitter", Value: slog.StringValue("node3")},
-	})
-
 	caKey := generateKeyPair(t)
 	node1Key := generateKeyPair(t)
 	node2Key := generateKeyPair(t)
@@ -172,7 +165,6 @@ func TestNewTransport(t *testing.T) {
 
 	node1Metrics := metrics.NewInmemSink(time.Second, 5*time.Minute)
 	node2Metrics := metrics.NewInmemSink(time.Second, 5*time.Minute)
-	node3Metrics := metrics.NewInmemSink(time.Second, 5*time.Minute)
 
 	ts1, err := NewTransport(&TransportConfig{
 		TlsConfig:  tcN1,
@@ -192,20 +184,6 @@ func TestNewTransport(t *testing.T) {
 		BindPort:   6022,
 		MetricSink: node2Metrics,
 		LogHandler: n2handler,
-	})
-	if err != nil {
-		t.Fatalf("failed to start node2: %s", err)
-		return
-	}
-
-	// node 3 will have the certificate and name of the node 2
-	// so we can test how things behave with collisions.
-	ts3, err := NewTransport(&TransportConfig{
-		TlsConfig:  tcN2,
-		BindAddr:   "127.0.0.1",
-		BindPort:   6023,
-		MetricSink: node3Metrics,
-		LogHandler: n3handler,
 	})
 	if err != nil {
 		t.Fatalf("failed to start node2: %s", err)
@@ -260,13 +238,6 @@ func TestNewTransport(t *testing.T) {
 			t.Fatalf("timed out")
 		}
 		cancel()
-	})
-
-	t.Run("name collision", func(t *testing.T) {
-		// node3 with name "node2" will connect to "node1" so it should realise there
-		// is a collision.
-		_, err = ts3.WriteTo([]byte("I swere I am node 2!"), "localhost:6021")
-		require.NoError(t, err)
 	})
 }
 

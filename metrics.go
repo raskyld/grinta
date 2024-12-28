@@ -7,32 +7,24 @@ import (
 )
 
 var (
-	// MetricGrintaUdpRx represents how much bytes have been received
-	// as QUIC datagrams.
-	MetricGrintaDatagramInBytes        = []string{"grinta", "datagram", "in", "bytes"}
-	MetricGrintaDatagramInErrorCount   = []string{"grinta", "datagram", "in", "error", "count"}
-	MetricGrintaDatagramOutBytes       = []string{"grinta", "datagram", "out", "bytes"}
-	MetricGrintaDatagramOutErrorCount  = []string{"grinta", "datagram", "out", "error", "count"}
-	MetricGrintaStreamEstInCount       = []string{"grinta", "stream", "establishment", "in", "count"}
-	MetricGrintaStreamEstInErrorCount  = []string{"grinta", "stream", "establishment", "in", "error", "count"}
-	MetricGrintaStreamEstOutCount      = []string{"grinta", "stream", "establishment", "out", "count"}
-	MetricGrintaStreamEstOutErrorCount = []string{"grinta", "stream", "establishment", "out", "error", "count"}
-	MetricGrintaUDPBufferSizeBytes     = []string{"grinta", "udp", "buffer", "size", "bytes"}
-	MetricGrintaConnErrorCount         = []string{"grinta", "connection", "error", "count"}
-	MetricGrintaConnEstCount           = []string{"grinta", "connection", "established", "count"}
-	MetricGrintaHostNameChanges        = []string{"grinta", "host", "name", "changes"}
-	MetricGrintaHostAddrChanges        = []string{"grinta", "host", "addr", "changes"}
-	MetricGrintaHostConflictsCount     = []string{"grinta", "host", "name", "conflicts", "count"}
+	MetricDByte = []string{"grinta", "datagram", "bytes"}
+	MetricDErr  = []string{"grinta", "datagram", "errors"}
+
+	MetricSCount = []string{"grinta", "stream", "count"}
+	MetricSErr   = []string{"grinta", "stream", "errors"}
+
+	MetricConnCount = []string{"grinta", "connection", "count"}
+	MetricConnErr   = []string{"grinta", "connection", "errors"}
 )
 
 type TelemetryLabel string
 
-var (
-	LabelError      TelemetryLabel = "error"
-	LabelPeerAddr   TelemetryLabel = "peer_addr"
-	LabelPeerName   TelemetryLabel = "peer_name"
-	LabelStreamMode TelemetryLabel = "stream_mode"
-	LabelStreamID   TelemetryLabel = "stream_id"
+const (
+	LabelError       TelemetryLabel = "error"
+	LabelPeerAddr    TelemetryLabel = "peer_addr"
+	LabelStreamMode  TelemetryLabel = "stream_mode"
+	LabelStreamID    TelemetryLabel = "stream_id"
+	LabelPerspective TelemetryLabel = "perspective"
 )
 
 func (lab TelemetryLabel) M(val string) metrics.Label {

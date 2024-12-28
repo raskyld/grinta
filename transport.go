@@ -11,7 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unique"
 
 	"github.com/hashicorp/go-metrics"
 	"github.com/hashicorp/memberlist"
@@ -20,18 +19,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const defaultUDPBufferSize int = 1 << 21
-
 // TransportConfig represents configuration for the GRINTA protocol.
 type TransportConfig struct {
-	// BufferSize of the requested UDP kernel buffer.
-	BufferSize int
-
-	// EnforceBufferSize crashes if the kernel doesn't allocate what we asked.
-	// If that's false, we retry and divide by 2 the requested
-	// `TransportConfig.BufferSize` until it fits or fails.
-	EnforceBufferSize bool
-
 	// TlsConfig should be configured to ensure mTLS is enabled between the
 	// peers.
 	TlsConfig *tls.Config
@@ -45,9 +34,6 @@ type TransportConfig struct {
 	// If this number is too low and you allocate a lot of flow, GRINTA will open
 	// a lot of connection instead of multiplexing flows efficiently.
 	HintMaxFlows int64
-
-	// HostnameResolver to resolve hostname from peer certificates.
-	HostnameResolver HostnameResolver
 
 	// MetricsLabels to add to every metrics emitted by the GRINTA protocol.
 	MetricLabels []metrics.Label
@@ -77,11 +63,9 @@ type Transport struct {
 	gracefulTerm atomic.Bool
 
 	// GRINTA protocol
-	flowCh     chan *streamWrapper
-	AddrToHost map[string]unique.Handle[Hostname]
-	hostsInfo  map[unique.Handle[Hostname]]Host
-	hostsCxs   map[unique.Handle[Hostname]][]hostCx
-	hostsLock  sync.RWMutex
+	flowCh    chan *streamWrapper
+	hostsCxs  map[string][]hostCx
+	hostsLock sync.RWMutex
 
 	// Memberlist Protocol
 	packetCh chan *memberlist.Packet
@@ -102,19 +86,24 @@ type hostCx struct {
 	quic.Connection
 }
 
+type Perspective uint8
+
+const (
+	ServerPerspective Perspective = iota
+	ClientPerspective
+)
+
 func NewTransport(cfg *TransportConfig) (trans *Transport, err error) {
 	if cfg.TlsConfig == nil {
 		return nil, ErrNoTLSConfig
 	}
 
 	t := &Transport{
-		cfg:        cfg,
-		flowCh:     make(chan *streamWrapper),
-		AddrToHost: make(map[string]unique.Handle[Hostname]),
-		hostsInfo:  make(map[unique.Handle[Hostname]]Host),
-		hostsCxs:   make(map[unique.Handle[Hostname]][]hostCx),
-		packetCh:   make(chan *memberlist.Packet),
-		streamCh:   make(chan net.Conn),
+		cfg:      cfg,
+		flowCh:   make(chan *streamWrapper),
+		hostsCxs: make(map[string][]hostCx),
+		packetCh: make(chan *memberlist.Packet),
+		streamCh: make(chan net.Conn),
 	}
 
 	if cfg.LogHandler == nil {
@@ -159,11 +148,6 @@ func NewTransport(cfg *TransportConfig) (trans *Transport, err error) {
 		return nil, fmt.Errorf("transport: failed to allocate UDP listener: %w", err)
 	}
 	t.udpLn = udpLn
-
-	requested := cfg.BufferSize
-	if requested == 0 {
-		requested = defaultUDPBufferSize
-	}
 
 	t.tr = &quic.Transport{
 		Conn:                             udpLn,
@@ -244,22 +228,29 @@ func (t *Transport) WriteToAddress(b []byte, addr memberlist.Address) (time.Time
 		return time.Time{}, err
 	}
 
-	mLabels := append(t.cfg.MetricLabels, LabelPeerAddr.M(addr.Addr), LabelPeerName.M(addr.Name))
+	mLabels := append(
+		t.cfg.MetricLabels,
+		LabelPeerAddr.M(addr.Addr),
+		LabelPerspective.M(ClientPerspective.String()),
+	)
+
 	err = conn.SendDatagram(b)
 	ts := time.Now()
+
 	if err == nil {
 		t.msink.IncrCounterWithLabels(
-			MetricGrintaDatagramOutBytes,
+			MetricDByte,
 			float32(len(b)),
 			mLabels,
 		)
 	} else {
 		t.msink.IncrCounterWithLabels(
-			MetricGrintaDatagramOutErrorCount,
+			MetricDErr,
 			1.0,
 			mLabels,
 		)
 	}
+
 	return ts, err
 }
 
@@ -277,10 +268,10 @@ func (t *Transport) DialAddressTimeout(addr memberlist.Address, timeout time.Dur
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	hcx, err := t.getActiveCx(ctx, addr)
-	mLabels := append(t.cfg.MetricLabels, LabelPeerAddr.M(addr.Addr), LabelPeerName.M(addr.Name))
+	mLabels := append(t.cfg.MetricLabels, LabelPeerAddr.M(addr.Addr), LabelPerspective.M(ClientPerspective.String()))
 	if err != nil {
 		t.msink.IncrCounterWithLabels(
-			MetricGrintaStreamEstOutErrorCount,
+			MetricSErr,
 			1.0,
 			append(mLabels, LabelError.M("no_conn_to_host")),
 		)
@@ -290,7 +281,7 @@ func (t *Transport) DialAddressTimeout(addr memberlist.Address, timeout time.Dur
 	stream, err := hcx.OpenStreamSync(ctx)
 	if err != nil {
 		t.msink.IncrCounterWithLabels(
-			MetricGrintaStreamEstOutErrorCount,
+			MetricSErr,
 			1.0,
 			append(mLabels, LabelError.M("cannot_open_stream")),
 		)
@@ -356,15 +347,23 @@ func (t *Transport) acceptCx() {
 			}
 		}
 
-		t.handleConn(conn, true)
+		t.handleConn(conn, ServerPerspective)
 	}
 }
 
 func (t *Transport) waitForDatagrams(hcx hostCx) {
-	remoteAddr := hcx.RemoteAddr()
+	peer := hcx.RemoteAddr().String()
 	ctx := hcx.Context()
-	logger := t.logger.With("remote", remoteAddr)
-	mLabels := append(t.cfg.MetricLabels, LabelPeerAddr.M(remoteAddr.String()))
+
+	logger := t.logger.With(
+		LabelPeerAddr.L(peer),
+		LabelPerspective.L(ServerPerspective.String()),
+	)
+	mLabels := append(t.cfg.MetricLabels,
+		LabelPeerAddr.M(peer),
+		LabelPerspective.M(ServerPerspective.String()),
+	)
+
 	for {
 		buf, err := hcx.ReceiveDatagram(ctx)
 		ts := time.Now()
@@ -375,14 +374,14 @@ func (t *Transport) waitForDatagrams(hcx hostCx) {
 		if err != nil {
 			if ctx.Err() != nil {
 				t.msink.IncrCounterWithLabels(
-					MetricGrintaDatagramInErrorCount,
+					MetricDErr,
 					1.0,
 					append(mLabels, LabelError.M("connection_broken")),
 				)
 				break
 			}
 			t.msink.IncrCounterWithLabels(
-				MetricGrintaDatagramInErrorCount,
+				MetricDErr,
 				1.0,
 				append(mLabels, LabelError.M("transient")),
 			)
@@ -393,7 +392,7 @@ func (t *Transport) waitForDatagrams(hcx hostCx) {
 		n := len(buf)
 		if n < 1 {
 			t.msink.IncrCounterWithLabels(
-				MetricGrintaDatagramInErrorCount,
+				MetricDErr,
 				1.0,
 				append(mLabels, LabelError.M("too_small")),
 			)
@@ -401,20 +400,27 @@ func (t *Transport) waitForDatagrams(hcx hostCx) {
 			continue
 		}
 
-		t.msink.IncrCounterWithLabels(MetricGrintaDatagramInBytes, float32(n), mLabels)
+		t.msink.IncrCounterWithLabels(MetricDByte, float32(n), mLabels)
 		t.packetCh <- &memberlist.Packet{
 			Buf:       buf,
-			From:      remoteAddr,
+			From:      hcx.RemoteAddr(),
 			Timestamp: ts,
 		}
 	}
 }
 
 func (t *Transport) handleStreams(hcx hostCx) {
-	remoteAddr := hcx.RemoteAddr()
+	peer := hcx.RemoteAddr().String()
 	ctx := hcx.Context()
-	logger := t.logger.With("remote", remoteAddr)
-	mLabels := append(t.cfg.MetricLabels, LabelPeerAddr.M(remoteAddr.String()))
+
+	logger := t.logger.With(
+		LabelPeerAddr.L(peer),
+		LabelPerspective.L(ServerPerspective.String()),
+	)
+	mLabels := append(t.cfg.MetricLabels,
+		LabelPeerAddr.M(peer),
+		LabelPerspective.M(ServerPerspective.String()),
+	)
 
 	for {
 		stream, err := hcx.AcceptStream(ctx)
@@ -426,7 +432,7 @@ func (t *Transport) handleStreams(hcx hostCx) {
 			if ctx.Err() != nil {
 				logger.Warn("connection was broken", LabelError.L(ctx.Err()))
 				t.msink.IncrCounterWithLabels(
-					MetricGrintaStreamEstInErrorCount,
+					MetricSErr,
 					1.0,
 					append(mLabels, LabelError.M("connection_broken")),
 				)
@@ -435,7 +441,7 @@ func (t *Transport) handleStreams(hcx hostCx) {
 
 			logger.Warn("transient error accepting stream", LabelError.L(err))
 			t.msink.IncrCounterWithLabels(
-				MetricGrintaStreamEstInErrorCount,
+				MetricSErr,
 				1.0,
 				append(mLabels, LabelError.M("transient")),
 			)
@@ -468,25 +474,13 @@ func (t *Transport) getActiveCx(
 	target memberlist.Address,
 ) (hostCx, error) {
 	t.hostsLock.RLock()
-	var dest unique.Handle[Hostname]
-	if target.Name != "" {
-		dest = unique.Make(Hostname(target.Name))
-	} else {
-		resolved, ok := t.AddrToHost[target.Addr]
-		if !ok {
-			t.hostsLock.RUnlock()
-			return t.dial(ctx, target.Addr)
-		}
-		dest = resolved
-	}
+	cx, hasCx := t.firstActiveCx(target.Addr)
+	t.hostsLock.RUnlock()
 
-	cx, hasCx := t.firstActiveCx(dest)
 	if hasCx {
-		t.hostsLock.RUnlock()
 		return cx, nil
 	}
 
-	t.hostsLock.RUnlock()
 	return t.dial(ctx, target.Addr)
 }
 
@@ -505,18 +499,18 @@ func (t *Transport) dial(ctx context.Context, target string) (hostCx, error) {
 		return hostCx{}, err
 	}
 
-	return t.handleConn(cx, false)
+	return t.handleConn(cx, ClientPerspective)
 }
 
 // not thread safe!
 // must be called by an holder of Write lock
-func (t *Transport) garbageCollectCxs(dest unique.Handle[Hostname]) ([]hostCx, bool) {
-	logger := t.logger.With(LabelPeerName.L(dest.Value()))
-	cxs, hasCxs := t.hostsCxs[dest]
+func (t *Transport) garbageCollectCxs(target string) ([]hostCx, bool) {
+	cxs, hasCxs := t.hostsCxs[target]
 	if !hasCxs {
 		return cxs, hasCxs
 	}
 
+	logger := t.logger.With(LabelPeerAddr.L(target))
 	cleanedUpList := make([]hostCx, 0, len(cxs))
 	for _, cx := range cxs {
 		if cx.Context().Err() == nil {
@@ -525,11 +519,11 @@ func (t *Transport) garbageCollectCxs(dest unique.Handle[Hostname]) ([]hostCx, b
 	}
 
 	if len(cleanedUpList) == 0 {
-		delete(t.hostsCxs, dest)
+		delete(t.hostsCxs, target)
 		logger.Debug("finished connection gc: all connections are now dead")
 		return nil, false
 	} else {
-		t.hostsCxs[dest] = cleanedUpList
+		t.hostsCxs[target] = cleanedUpList
 	}
 
 	if len(cleanedUpList) != len(cxs) {
@@ -540,8 +534,8 @@ func (t *Transport) garbageCollectCxs(dest unique.Handle[Hostname]) ([]hostCx, b
 
 // not thread safe!
 // must be called by an holder of Read lock
-func (t *Transport) firstActiveCx(dest unique.Handle[Hostname]) (hostCx, bool) {
-	cxs, hasCxs := t.hostsCxs[dest]
+func (t *Transport) firstActiveCx(target string) (hostCx, bool) {
+	cxs, hasCxs := t.hostsCxs[target]
 	if !hasCxs {
 		return hostCx{}, false
 	}
@@ -555,154 +549,27 @@ func (t *Transport) firstActiveCx(dest unique.Handle[Hostname]) (hostCx, bool) {
 	return hostCx{}, false
 }
 
-func (t *Transport) handleConn(conn quic.Connection, inbound bool) (hostCx, error) {
-	peer := conn.RemoteAddr().String()
-	peerAddrPort := strings.Split(peer, ":")
-	if len(peerAddrPort) != 2 {
-		panic("unreachable: unexpected address format")
-	}
-	peerAddr := peerAddrPort[0]
-	peerPort, err := strconv.Atoi(peerAddrPort[1])
-	if err != nil {
-		panic(err)
-	}
-
-	logger := t.logger.With(LabelPeerAddr.L(peer))
-	mLabels := append(t.cfg.MetricLabels, LabelPeerAddr.M(peer))
-	resolver := t.cfg.HostnameResolver
-	if resolver == nil {
-		resolver = CommonNameResolver
-	}
-
-	rsvHostname, err, uerr := resolver(conn.ConnectionState().TLS.PeerCertificates)
-	if err != nil {
-		logger.Error("failed to resolve hostname", "error", err)
-		t.msink.IncrCounterWithLabels(
-			MetricGrintaConnErrorCount,
-			1.0,
-			append(mLabels, LabelError.M("name_resolution")),
-		)
-		if uerr == "" {
-			QErrInternal.Close(
-				conn,
-				"unexpected error during hostname resolution",
-			)
-		} else {
-			QErrInternal.Close(
-				conn,
-				fmt.Sprintf("error during resolution: %s", uerr),
-			)
-		}
-		return hostCx{}, ErrHostnameResolve
-	}
-
-	logger = logger.With(LabelPeerName.L(rsvHostname))
-	mLabels = append(mLabels, LabelPeerName.M(string(rsvHostname)))
-
-	rsvHostnameHandle := unique.Make(Hostname(rsvHostname))
-	t.hostsLock.Lock()
-	// First, we check if we need to update our Addr to Hostname
-	// mapping.
-	currentHostname, ok := t.AddrToHost[peer]
-	if ok {
-		if currentHostname != rsvHostnameHandle {
-			logger := logger.With(
-				"old", currentHostname.Value(),
-				"new", rsvHostname,
-			)
-
-			logger.Warn("a peer changed its name, updating")
-			t.AddrToHost[peer] = rsvHostnameHandle
-
-			// We need to migrate the connections as well.
-			cxs, hasConnections := t.hostsCxs[currentHostname]
-			if hasConnections {
-				logger.Debug("migrating connections")
-				delete(t.hostsCxs, currentHostname)
-				t.hostsCxs[rsvHostnameHandle] = cxs
-			}
-			t.msink.IncrCounterWithLabels(
-				MetricGrintaHostNameChanges,
-				1.0,
-				append(t.cfg.MetricLabels, LabelPeerAddr.M(peer)),
-			)
-		}
-	} else {
-		t.AddrToHost[peer] = rsvHostnameHandle
-		logger.Info("new peer discovered")
-	}
-
-	// We also check if we have node name conflict
-	hostInfo, ok := t.hostsInfo[rsvHostnameHandle]
-	if ok {
-		if hostInfo.Addr != peerAddr || hostInfo.Port != peerPort {
-			logger := logger.With(
-				"oldAddr", hostInfo.Addr,
-				"oldPort", hostInfo.Port,
-				"newAddr", peerAddr,
-				"newPort", peerPort,
-			)
-			logger.Warn("a node has been migrated or there is a name conflict in the cluster")
-			t.msink.IncrCounterWithLabels(
-				MetricGrintaHostNameChanges,
-				1.0,
-				append(t.cfg.MetricLabels, LabelPeerName.M(string(rsvHostname))),
-			)
-
-			gcHost, stillHasConnection := t.garbageCollectCxs(rsvHostnameHandle)
-			if stillHasConnection {
-				msg := "we detected a node name conflict in the cluster! " +
-					"this may be because you have rescheduled a node on another machine, " +
-					"if you haven't, then it could mean one of your certificate has leaked! " +
-					"if that's the case, you must revoke the certificate or add the hostname to " +
-					"the BanList config."
-
-				logger.Error(msg)
-				t.msink.IncrCounterWithLabels(
-					MetricGrintaHostConflictsCount,
-					1.0,
-					append(t.cfg.MetricLabels, LabelPeerAddr.M(peer)),
-				)
-
-				for _, cx := range gcHost {
-					// TODO(raskyld): implement a ban list.
-					// TODO(raskyld): implement connection drain out of Shutdown()
-					QErrNameConflict.Close(cx, msg)
-				}
-				delete(t.hostsCxs, rsvHostnameHandle)
-			}
-
-			t.hostsInfo[rsvHostnameHandle] = Host{
-				Name: rsvHostnameHandle,
-				Addr: peerAddr,
-				Port: peerPort,
-			}
-		}
-	} else {
-		t.hostsInfo[rsvHostnameHandle] = Host{
-			Name: rsvHostnameHandle,
-			Addr: peerAddr,
-			Port: peerPort,
-		}
-	}
-
-	// Then, we actually perform the connection update
-	// after a pass of garbage collection.
+func (t *Transport) handleConn(conn quic.Connection, perspective Perspective) (hostCx, error) {
 	hcx := hostCx{
 		closeCh:    make(chan struct{}, 1),
 		Connection: conn,
 	}
-	gcHost, _ := t.garbageCollectCxs(rsvHostnameHandle)
-	t.hostsCxs[rsvHostnameHandle] = append(gcHost, hcx)
+	peer := conn.RemoteAddr().String()
+
+	t.hostsLock.Lock()
+	gcHost, _ := t.garbageCollectCxs(peer)
+	t.hostsCxs[peer] = append(gcHost, hcx)
 	t.hostsLock.Unlock()
 
 	t.msink.IncrCounterWithLabels(
-		MetricGrintaConnEstCount,
+		MetricConnCount,
 		1.0,
-		mLabels,
+		append(t.cfg.MetricLabels, LabelPeerAddr.M(peer), LabelPerspective.M(perspective.String())),
 	)
 
-	logger.Info("new connection established", "inbound", inbound)
+	t.logger.
+		With(LabelPeerAddr.L(peer), LabelPerspective.L(perspective.String())).
+		Info("new connection established")
 
 	// NB: it's ok to pass by value, the struct is just two cheap pointers.
 	go t.waitForDatagrams(hcx)
@@ -720,20 +587,14 @@ func (t *Transport) initialiseOutboundStream(
 	logger := t.logger.With(
 		LabelStreamID.L(stream.StreamID()),
 		LabelPeerAddr.L(peerAddr),
+		LabelPerspective.L(ClientPerspective.String()),
 	)
 	mLabels := append(
 		t.cfg.MetricLabels,
 		LabelPeerAddr.M(peerAddr),
+		LabelPerspective.M(ClientPerspective.String()),
 	)
 
-	logger.Debug("initiating outbound stream")
-	swrap := &streamWrapper{
-		localAddr:  hcx.LocalAddr(),
-		remoteAddr: hcx.RemoteAddr(),
-		Stream:     stream,
-	}
-
-	go swrap.garbageCollector(hcx.closeCh)
 	frame := &grintav1alpha1.Frame{
 		Type: &grintav1alpha1.Frame_Init{
 			Init: initFrame,
@@ -753,14 +614,13 @@ func (t *Transport) initialiseOutboundStream(
 
 	n, err := stream.Write(buf)
 	if err != nil {
-		mLabels := append(
-			mLabels,
-			LabelError.M("cannot_send_init_frame"),
-		)
 		t.msink.IncrCounterWithLabels(
-			MetricGrintaStreamEstOutErrorCount,
+			MetricSErr,
 			1.0,
-			mLabels,
+			append(
+				mLabels,
+				LabelError.M("cannot_send_init_frame"),
+			),
 		)
 		return nil, fmt.Errorf("%w: %w", ErrStreamWrite, err)
 	}
@@ -772,28 +632,32 @@ func (t *Transport) initialiseOutboundStream(
 			"actual", n,
 			LabelError.L(ErrTooLargeFrame),
 		)
-
-		mLabels := append(
-			mLabels,
-			LabelError.M("init_frame_too_large"),
-		)
 		t.msink.IncrCounterWithLabels(
-			MetricGrintaStreamEstOutErrorCount,
+			MetricSErr,
 			1.0,
-			mLabels,
+			append(
+				mLabels,
+				LabelError.M("init_frame_too_large"),
+			),
 		)
 
 		return nil, ErrTooLargeFrame
 	}
 
+	logger.Debug("new stream established")
 	t.msink.IncrCounterWithLabels(
-		MetricGrintaStreamEstOutCount,
+		MetricSCount,
 		1.0,
-		append(
-			mLabels,
-			LabelError.M("cannot_send_init_frame"),
-		),
+		mLabels,
 	)
+
+	swrap := &streamWrapper{
+		localAddr:  hcx.LocalAddr(),
+		remoteAddr: hcx.RemoteAddr(),
+		Stream:     stream,
+	}
+
+	go swrap.garbageCollector(hcx.closeCh)
 	return swrap, nil
 }
 
@@ -806,20 +670,13 @@ func (t *Transport) initialiseInboundStream(
 	logger := t.logger.With(
 		LabelStreamID.L(stream.StreamID()),
 		LabelPeerAddr.L(peerAddr),
+		LabelPerspective.L(ServerPerspective.String()),
 	)
 	mLabels := append(
 		t.cfg.MetricLabels,
 		LabelPeerAddr.M(peerAddr),
+		LabelPerspective.M(ServerPerspective.String()),
 	)
-
-	logger.Debug("initiating outbound stream")
-	swrap := &streamWrapper{
-		localAddr:  hcx.LocalAddr(),
-		remoteAddr: hcx.RemoteAddr(),
-		Stream:     stream,
-	}
-
-	go swrap.garbageCollector(hcx.closeCh)
 
 	dl, ok := ctx.Deadline()
 	if ok {
@@ -838,7 +695,7 @@ func (t *Transport) initialiseInboundStream(
 			if serr := stream.Context().Err(); serr != nil {
 				logger.Warn("stream was broken", LabelError.L(serr))
 				t.msink.IncrCounterWithLabels(
-					MetricGrintaStreamEstInErrorCount,
+					MetricSErr,
 					1.0,
 					append(mLabels, LabelError.M("stream_broken")),
 				)
@@ -847,7 +704,7 @@ func (t *Transport) initialiseInboundStream(
 
 			if ctx.Err() != nil {
 				t.msink.IncrCounterWithLabels(
-					MetricGrintaStreamEstInErrorCount,
+					MetricSErr,
 					1.0,
 					append(mLabels, LabelError.M("stream_read_timeout")),
 				)
@@ -869,11 +726,11 @@ func (t *Transport) initialiseInboundStream(
 	var frame grintav1alpha1.Frame
 	err := proto.Unmarshal(buf[:n], &frame)
 	if err != nil {
-		logger.Warn("grinta protocol violation: malformed frame", "error", err)
+		logger.Warn("grinta protocol violation: malformed frame", LabelError.L(err))
 		stream.CancelRead(QErrStreamProtocolViolation)
 		stream.CancelWrite(QErrStreamProtocolViolation)
 		t.msink.IncrCounterWithLabels(
-			MetricGrintaStreamEstInErrorCount,
+			MetricSErr,
 			1.0,
 			append(mLabels, LabelError.M("protocol_violation")),
 		)
@@ -886,20 +743,41 @@ func (t *Transport) initialiseInboundStream(
 		stream.CancelRead(QErrStreamProtocolViolation)
 		stream.CancelWrite(QErrStreamProtocolViolation)
 		t.msink.IncrCounterWithLabels(
-			MetricGrintaStreamEstInErrorCount,
+			MetricSErr,
 			1.0,
 			append(mLabels, LabelError.M("protocol_violation")),
 		)
 		return nil, ErrProtocolViolation
 	}
 
-	swrap.mode = initFrame.Init.Mode
-	swrap.destination = initFrame.Init.GetDestName()
-	swrap.source = initFrame.Init.GetSrcName()
+	swrap := &streamWrapper{
+		mode:        initFrame.Init.Mode,
+		localAddr:   hcx.LocalAddr(),
+		remoteAddr:  hcx.RemoteAddr(),
+		destination: initFrame.Init.GetDestName(),
+		source:      initFrame.Init.GetSrcName(),
+
+		Stream: stream,
+	}
+
+	go swrap.garbageCollector(hcx.closeCh)
+
+	logger.Debug("new stream established")
 	t.msink.IncrCounterWithLabels(
-		MetricGrintaStreamEstInCount,
+		MetricSCount,
 		1.0,
 		append(mLabels, LabelStreamMode.M(swrap.mode.String())),
 	)
+
 	return swrap, nil
+}
+
+func (p Perspective) String() string {
+	switch p {
+	case ServerPerspective:
+		return "server"
+	case ClientPerspective:
+		return "client"
+	}
+	panic("unreachable")
 }

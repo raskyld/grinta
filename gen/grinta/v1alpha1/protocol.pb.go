@@ -66,6 +66,50 @@ func (x StreamMode) Number() protoreflect.EnumNumber {
 	return protoreflect.EnumNumber(x)
 }
 
+type NameClaimMode int32
+
+const (
+	NameClaimMode_NAME_CLAIM_MODE_UNSPECIFIED NameClaimMode = 0
+	NameClaimMode_NAME_CLAIM_MODE_CLAIM       NameClaimMode = 1
+	NameClaimMode_NAME_CLAIM_MODE_UNCLAIM     NameClaimMode = 2
+)
+
+// Enum value maps for NameClaimMode.
+var (
+	NameClaimMode_name = map[int32]string{
+		0: "NAME_CLAIM_MODE_UNSPECIFIED",
+		1: "NAME_CLAIM_MODE_CLAIM",
+		2: "NAME_CLAIM_MODE_UNCLAIM",
+	}
+	NameClaimMode_value = map[string]int32{
+		"NAME_CLAIM_MODE_UNSPECIFIED": 0,
+		"NAME_CLAIM_MODE_CLAIM":       1,
+		"NAME_CLAIM_MODE_UNCLAIM":     2,
+	}
+)
+
+func (x NameClaimMode) Enum() *NameClaimMode {
+	p := new(NameClaimMode)
+	*p = x
+	return p
+}
+
+func (x NameClaimMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (NameClaimMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_grinta_v1alpha1_protocol_proto_enumTypes[1].Descriptor()
+}
+
+func (NameClaimMode) Type() protoreflect.EnumType {
+	return &file_grinta_v1alpha1_protocol_proto_enumTypes[1]
+}
+
+func (x NameClaimMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
 // Frame is the actual data transported over the QUIC streams.
 type Frame struct {
 	state           protoimpl.MessageState `protogen:"opaque.v1"`
@@ -382,32 +426,34 @@ func (b0 InitFrame_builder) Build() *InitFrame {
 	return m0
 }
 
-// GossipFrameNameRecord is a mapping of an endpoint name to
-// a destination node.
-type GossipFrameNameRecord struct {
+// NameClaim is an event representing the claim of a node over a name.
+type NameClaim struct {
 	state                   protoimpl.MessageState `protogen:"opaque.v1"`
 	xxx_hidden_EndpointName *string                `protobuf:"bytes,1,opt,name=endpoint_name,json=endpointName" json:"endpoint_name,omitempty"`
 	xxx_hidden_NodeName     *string                `protobuf:"bytes,2,opt,name=node_name,json=nodeName" json:"node_name,omitempty"`
+	xxx_hidden_Rev          uint64                 `protobuf:"varint,3,opt,name=rev" json:"rev,omitempty"`
+	xxx_hidden_Reason       *string                `protobuf:"bytes,4,opt,name=reason" json:"reason,omitempty"`
+	xxx_hidden_Mode         NameClaimMode          `protobuf:"varint,5,opt,name=mode,enum=grinta.v1alpha1.NameClaimMode" json:"mode,omitempty"`
 	XXX_raceDetectHookData  protoimpl.RaceDetectHookData
 	XXX_presence            [1]uint32
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
 
-func (x *GossipFrameNameRecord) Reset() {
-	*x = GossipFrameNameRecord{}
+func (x *NameClaim) Reset() {
+	*x = NameClaim{}
 	mi := &file_grinta_v1alpha1_protocol_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *GossipFrameNameRecord) String() string {
+func (x *NameClaim) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*GossipFrameNameRecord) ProtoMessage() {}
+func (*NameClaim) ProtoMessage() {}
 
-func (x *GossipFrameNameRecord) ProtoReflect() protoreflect.Message {
+func (x *NameClaim) ProtoReflect() protoreflect.Message {
 	mi := &file_grinta_v1alpha1_protocol_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -419,7 +465,7 @@ func (x *GossipFrameNameRecord) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-func (x *GossipFrameNameRecord) GetEndpointName() string {
+func (x *NameClaim) GetEndpointName() string {
 	if x != nil {
 		if x.xxx_hidden_EndpointName != nil {
 			return *x.xxx_hidden_EndpointName
@@ -429,7 +475,7 @@ func (x *GossipFrameNameRecord) GetEndpointName() string {
 	return ""
 }
 
-func (x *GossipFrameNameRecord) GetNodeName() string {
+func (x *NameClaim) GetNodeName() string {
 	if x != nil {
 		if x.xxx_hidden_NodeName != nil {
 			return *x.xxx_hidden_NodeName
@@ -439,59 +485,392 @@ func (x *GossipFrameNameRecord) GetNodeName() string {
 	return ""
 }
 
-func (x *GossipFrameNameRecord) SetEndpointName(v string) {
+func (x *NameClaim) GetRev() uint64 {
+	if x != nil {
+		return x.xxx_hidden_Rev
+	}
+	return 0
+}
+
+func (x *NameClaim) GetReason() string {
+	if x != nil {
+		if x.xxx_hidden_Reason != nil {
+			return *x.xxx_hidden_Reason
+		}
+		return ""
+	}
+	return ""
+}
+
+func (x *NameClaim) GetMode() NameClaimMode {
+	if x != nil {
+		if protoimpl.X.Present(&(x.XXX_presence[0]), 4) {
+			return x.xxx_hidden_Mode
+		}
+	}
+	return NameClaimMode_NAME_CLAIM_MODE_UNSPECIFIED
+}
+
+func (x *NameClaim) SetEndpointName(v string) {
 	x.xxx_hidden_EndpointName = &v
-	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 0, 2)
+	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 0, 5)
 }
 
-func (x *GossipFrameNameRecord) SetNodeName(v string) {
+func (x *NameClaim) SetNodeName(v string) {
 	x.xxx_hidden_NodeName = &v
-	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 1, 2)
+	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 1, 5)
 }
 
-func (x *GossipFrameNameRecord) HasEndpointName() bool {
+func (x *NameClaim) SetRev(v uint64) {
+	x.xxx_hidden_Rev = v
+	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 2, 5)
+}
+
+func (x *NameClaim) SetReason(v string) {
+	x.xxx_hidden_Reason = &v
+	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 3, 5)
+}
+
+func (x *NameClaim) SetMode(v NameClaimMode) {
+	x.xxx_hidden_Mode = v
+	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 4, 5)
+}
+
+func (x *NameClaim) HasEndpointName() bool {
 	if x == nil {
 		return false
 	}
 	return protoimpl.X.Present(&(x.XXX_presence[0]), 0)
 }
 
-func (x *GossipFrameNameRecord) HasNodeName() bool {
+func (x *NameClaim) HasNodeName() bool {
 	if x == nil {
 		return false
 	}
 	return protoimpl.X.Present(&(x.XXX_presence[0]), 1)
 }
 
-func (x *GossipFrameNameRecord) ClearEndpointName() {
+func (x *NameClaim) HasRev() bool {
+	if x == nil {
+		return false
+	}
+	return protoimpl.X.Present(&(x.XXX_presence[0]), 2)
+}
+
+func (x *NameClaim) HasReason() bool {
+	if x == nil {
+		return false
+	}
+	return protoimpl.X.Present(&(x.XXX_presence[0]), 3)
+}
+
+func (x *NameClaim) HasMode() bool {
+	if x == nil {
+		return false
+	}
+	return protoimpl.X.Present(&(x.XXX_presence[0]), 4)
+}
+
+func (x *NameClaim) ClearEndpointName() {
 	protoimpl.X.ClearPresent(&(x.XXX_presence[0]), 0)
 	x.xxx_hidden_EndpointName = nil
 }
 
-func (x *GossipFrameNameRecord) ClearNodeName() {
+func (x *NameClaim) ClearNodeName() {
 	protoimpl.X.ClearPresent(&(x.XXX_presence[0]), 1)
 	x.xxx_hidden_NodeName = nil
 }
 
-type GossipFrameNameRecord_builder struct {
+func (x *NameClaim) ClearRev() {
+	protoimpl.X.ClearPresent(&(x.XXX_presence[0]), 2)
+	x.xxx_hidden_Rev = 0
+}
+
+func (x *NameClaim) ClearReason() {
+	protoimpl.X.ClearPresent(&(x.XXX_presence[0]), 3)
+	x.xxx_hidden_Reason = nil
+}
+
+func (x *NameClaim) ClearMode() {
+	protoimpl.X.ClearPresent(&(x.XXX_presence[0]), 4)
+	x.xxx_hidden_Mode = NameClaimMode_NAME_CLAIM_MODE_UNSPECIFIED
+}
+
+type NameClaim_builder struct {
 	_ [0]func() // Prevents comparability and use of unkeyed literals for the builder.
 
 	EndpointName *string
 	NodeName     *string
+	Rev          *uint64
+	Reason       *string
+	Mode         *NameClaimMode
 }
 
-func (b0 GossipFrameNameRecord_builder) Build() *GossipFrameNameRecord {
-	m0 := &GossipFrameNameRecord{}
+func (b0 NameClaim_builder) Build() *NameClaim {
+	m0 := &NameClaim{}
+	b, x := &b0, m0
+	_, _ = b, x
+	if b.EndpointName != nil {
+		protoimpl.X.SetPresentNonAtomic(&(x.XXX_presence[0]), 0, 5)
+		x.xxx_hidden_EndpointName = b.EndpointName
+	}
+	if b.NodeName != nil {
+		protoimpl.X.SetPresentNonAtomic(&(x.XXX_presence[0]), 1, 5)
+		x.xxx_hidden_NodeName = b.NodeName
+	}
+	if b.Rev != nil {
+		protoimpl.X.SetPresentNonAtomic(&(x.XXX_presence[0]), 2, 5)
+		x.xxx_hidden_Rev = *b.Rev
+	}
+	if b.Reason != nil {
+		protoimpl.X.SetPresentNonAtomic(&(x.XXX_presence[0]), 3, 5)
+		x.xxx_hidden_Reason = b.Reason
+	}
+	if b.Mode != nil {
+		protoimpl.X.SetPresentNonAtomic(&(x.XXX_presence[0]), 4, 5)
+		x.xxx_hidden_Mode = *b.Mode
+	}
+	return m0
+}
+
+type NameOwnershipQuery struct {
+	state                   protoimpl.MessageState `protogen:"opaque.v1"`
+	xxx_hidden_EndpointName *string                `protobuf:"bytes,1,opt,name=endpoint_name,json=endpointName" json:"endpoint_name,omitempty"`
+	xxx_hidden_LastRev      uint64                 `protobuf:"varint,2,opt,name=last_rev,json=lastRev" json:"last_rev,omitempty"`
+	XXX_raceDetectHookData  protoimpl.RaceDetectHookData
+	XXX_presence            [1]uint32
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
+}
+
+func (x *NameOwnershipQuery) Reset() {
+	*x = NameOwnershipQuery{}
+	mi := &file_grinta_v1alpha1_protocol_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NameOwnershipQuery) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NameOwnershipQuery) ProtoMessage() {}
+
+func (x *NameOwnershipQuery) ProtoReflect() protoreflect.Message {
+	mi := &file_grinta_v1alpha1_protocol_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+func (x *NameOwnershipQuery) GetEndpointName() string {
+	if x != nil {
+		if x.xxx_hidden_EndpointName != nil {
+			return *x.xxx_hidden_EndpointName
+		}
+		return ""
+	}
+	return ""
+}
+
+func (x *NameOwnershipQuery) GetLastRev() uint64 {
+	if x != nil {
+		return x.xxx_hidden_LastRev
+	}
+	return 0
+}
+
+func (x *NameOwnershipQuery) SetEndpointName(v string) {
+	x.xxx_hidden_EndpointName = &v
+	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 0, 2)
+}
+
+func (x *NameOwnershipQuery) SetLastRev(v uint64) {
+	x.xxx_hidden_LastRev = v
+	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 1, 2)
+}
+
+func (x *NameOwnershipQuery) HasEndpointName() bool {
+	if x == nil {
+		return false
+	}
+	return protoimpl.X.Present(&(x.XXX_presence[0]), 0)
+}
+
+func (x *NameOwnershipQuery) HasLastRev() bool {
+	if x == nil {
+		return false
+	}
+	return protoimpl.X.Present(&(x.XXX_presence[0]), 1)
+}
+
+func (x *NameOwnershipQuery) ClearEndpointName() {
+	protoimpl.X.ClearPresent(&(x.XXX_presence[0]), 0)
+	x.xxx_hidden_EndpointName = nil
+}
+
+func (x *NameOwnershipQuery) ClearLastRev() {
+	protoimpl.X.ClearPresent(&(x.XXX_presence[0]), 1)
+	x.xxx_hidden_LastRev = 0
+}
+
+type NameOwnershipQuery_builder struct {
+	_ [0]func() // Prevents comparability and use of unkeyed literals for the builder.
+
+	EndpointName *string
+	LastRev      *uint64
+}
+
+func (b0 NameOwnershipQuery_builder) Build() *NameOwnershipQuery {
+	m0 := &NameOwnershipQuery{}
 	b, x := &b0, m0
 	_, _ = b, x
 	if b.EndpointName != nil {
 		protoimpl.X.SetPresentNonAtomic(&(x.XXX_presence[0]), 0, 2)
 		x.xxx_hidden_EndpointName = b.EndpointName
 	}
-	if b.NodeName != nil {
+	if b.LastRev != nil {
 		protoimpl.X.SetPresentNonAtomic(&(x.XXX_presence[0]), 1, 2)
-		x.xxx_hidden_NodeName = b.NodeName
+		x.xxx_hidden_LastRev = *b.LastRev
 	}
+	return m0
+}
+
+type NameOwnershipResponse struct {
+	state                   protoimpl.MessageState `protogen:"opaque.v1"`
+	xxx_hidden_Own          bool                   `protobuf:"varint,1,opt,name=own" json:"own,omitempty"`
+	xxx_hidden_EndpointName *string                `protobuf:"bytes,2,opt,name=endpoint_name,json=endpointName" json:"endpoint_name,omitempty"`
+	xxx_hidden_Claim        *NameClaim             `protobuf:"bytes,3,opt,name=claim" json:"claim,omitempty"`
+	XXX_raceDetectHookData  protoimpl.RaceDetectHookData
+	XXX_presence            [1]uint32
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
+}
+
+func (x *NameOwnershipResponse) Reset() {
+	*x = NameOwnershipResponse{}
+	mi := &file_grinta_v1alpha1_protocol_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NameOwnershipResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NameOwnershipResponse) ProtoMessage() {}
+
+func (x *NameOwnershipResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grinta_v1alpha1_protocol_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+func (x *NameOwnershipResponse) GetOwn() bool {
+	if x != nil {
+		return x.xxx_hidden_Own
+	}
+	return false
+}
+
+func (x *NameOwnershipResponse) GetEndpointName() string {
+	if x != nil {
+		if x.xxx_hidden_EndpointName != nil {
+			return *x.xxx_hidden_EndpointName
+		}
+		return ""
+	}
+	return ""
+}
+
+func (x *NameOwnershipResponse) GetClaim() *NameClaim {
+	if x != nil {
+		return x.xxx_hidden_Claim
+	}
+	return nil
+}
+
+func (x *NameOwnershipResponse) SetOwn(v bool) {
+	x.xxx_hidden_Own = v
+	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 0, 3)
+}
+
+func (x *NameOwnershipResponse) SetEndpointName(v string) {
+	x.xxx_hidden_EndpointName = &v
+	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 1, 3)
+}
+
+func (x *NameOwnershipResponse) SetClaim(v *NameClaim) {
+	x.xxx_hidden_Claim = v
+}
+
+func (x *NameOwnershipResponse) HasOwn() bool {
+	if x == nil {
+		return false
+	}
+	return protoimpl.X.Present(&(x.XXX_presence[0]), 0)
+}
+
+func (x *NameOwnershipResponse) HasEndpointName() bool {
+	if x == nil {
+		return false
+	}
+	return protoimpl.X.Present(&(x.XXX_presence[0]), 1)
+}
+
+func (x *NameOwnershipResponse) HasClaim() bool {
+	if x == nil {
+		return false
+	}
+	return x.xxx_hidden_Claim != nil
+}
+
+func (x *NameOwnershipResponse) ClearOwn() {
+	protoimpl.X.ClearPresent(&(x.XXX_presence[0]), 0)
+	x.xxx_hidden_Own = false
+}
+
+func (x *NameOwnershipResponse) ClearEndpointName() {
+	protoimpl.X.ClearPresent(&(x.XXX_presence[0]), 1)
+	x.xxx_hidden_EndpointName = nil
+}
+
+func (x *NameOwnershipResponse) ClearClaim() {
+	x.xxx_hidden_Claim = nil
+}
+
+type NameOwnershipResponse_builder struct {
+	_ [0]func() // Prevents comparability and use of unkeyed literals for the builder.
+
+	Own          *bool
+	EndpointName *string
+	Claim        *NameClaim
+}
+
+func (b0 NameOwnershipResponse_builder) Build() *NameOwnershipResponse {
+	m0 := &NameOwnershipResponse{}
+	b, x := &b0, m0
+	_, _ = b, x
+	if b.Own != nil {
+		protoimpl.X.SetPresentNonAtomic(&(x.XXX_presence[0]), 0, 3)
+		x.xxx_hidden_Own = *b.Own
+	}
+	if b.EndpointName != nil {
+		protoimpl.X.SetPresentNonAtomic(&(x.XXX_presence[0]), 1, 3)
+		x.xxx_hidden_EndpointName = b.EndpointName
+	}
+	x.xxx_hidden_Claim = b.Claim
 	return m0
 }
 
@@ -516,41 +895,72 @@ var file_grinta_v1alpha1_protocol_proto_rawDesc = []byte{
 	0x65, 0x73, 0x74, 0x5f, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08,
 	0x64, 0x65, 0x73, 0x74, 0x4e, 0x61, 0x6d, 0x65, 0x12, 0x19, 0x0a, 0x08, 0x73, 0x72, 0x63, 0x5f,
 	0x6e, 0x61, 0x6d, 0x65, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x73, 0x72, 0x63, 0x4e,
-	0x61, 0x6d, 0x65, 0x22, 0x59, 0x0a, 0x15, 0x47, 0x6f, 0x73, 0x73, 0x69, 0x70, 0x46, 0x72, 0x61,
-	0x6d, 0x65, 0x4e, 0x61, 0x6d, 0x65, 0x52, 0x65, 0x63, 0x6f, 0x72, 0x64, 0x12, 0x23, 0x0a, 0x0d,
-	0x65, 0x6e, 0x64, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x5f, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x01, 0x20,
-	0x01, 0x28, 0x09, 0x52, 0x0c, 0x65, 0x6e, 0x64, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x4e, 0x61, 0x6d,
-	0x65, 0x12, 0x1b, 0x0a, 0x09, 0x6e, 0x6f, 0x64, 0x65, 0x5f, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x02,
-	0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x6e, 0x6f, 0x64, 0x65, 0x4e, 0x61, 0x6d, 0x65, 0x2a, 0x57,
-	0x0a, 0x0a, 0x53, 0x74, 0x72, 0x65, 0x61, 0x6d, 0x4d, 0x6f, 0x64, 0x65, 0x12, 0x1b, 0x0a, 0x17,
-	0x53, 0x54, 0x52, 0x45, 0x41, 0x4d, 0x5f, 0x4d, 0x4f, 0x44, 0x45, 0x5f, 0x55, 0x4e, 0x53, 0x50,
-	0x45, 0x43, 0x49, 0x46, 0x49, 0x45, 0x44, 0x10, 0x00, 0x12, 0x16, 0x0a, 0x12, 0x53, 0x54, 0x52,
-	0x45, 0x41, 0x4d, 0x5f, 0x4d, 0x4f, 0x44, 0x45, 0x5f, 0x47, 0x4f, 0x53, 0x53, 0x49, 0x50, 0x10,
-	0x01, 0x12, 0x14, 0x0a, 0x10, 0x53, 0x54, 0x52, 0x45, 0x41, 0x4d, 0x5f, 0x4d, 0x4f, 0x44, 0x45,
-	0x5f, 0x46, 0x4c, 0x4f, 0x57, 0x10, 0x02, 0x42, 0x46, 0x5a, 0x3c, 0x67, 0x69, 0x74, 0x68, 0x75,
-	0x62, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x72, 0x61, 0x73, 0x6b, 0x79, 0x6c, 0x64, 0x2f, 0x67, 0x72,
-	0x69, 0x6e, 0x74, 0x61, 0x2f, 0x67, 0x65, 0x6e, 0x2f, 0x67, 0x72, 0x69, 0x6e, 0x74, 0x61, 0x2f,
-	0x76, 0x31, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x31, 0x3b, 0x67, 0x72, 0x69, 0x6e, 0x74, 0x61, 0x76,
-	0x31, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x31, 0x92, 0x03, 0x05, 0xd2, 0x3e, 0x02, 0x10, 0x03, 0x62,
-	0x08, 0x65, 0x64, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x73, 0x70, 0xe8, 0x07,
+	0x61, 0x6d, 0x65, 0x22, 0xab, 0x01, 0x0a, 0x09, 0x4e, 0x61, 0x6d, 0x65, 0x43, 0x6c, 0x61, 0x69,
+	0x6d, 0x12, 0x23, 0x0a, 0x0d, 0x65, 0x6e, 0x64, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x5f, 0x6e, 0x61,
+	0x6d, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0c, 0x65, 0x6e, 0x64, 0x70, 0x6f, 0x69,
+	0x6e, 0x74, 0x4e, 0x61, 0x6d, 0x65, 0x12, 0x1b, 0x0a, 0x09, 0x6e, 0x6f, 0x64, 0x65, 0x5f, 0x6e,
+	0x61, 0x6d, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x6e, 0x6f, 0x64, 0x65, 0x4e,
+	0x61, 0x6d, 0x65, 0x12, 0x10, 0x0a, 0x03, 0x72, 0x65, 0x76, 0x18, 0x03, 0x20, 0x01, 0x28, 0x04,
+	0x52, 0x03, 0x72, 0x65, 0x76, 0x12, 0x16, 0x0a, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x18,
+	0x04, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x12, 0x32, 0x0a,
+	0x04, 0x6d, 0x6f, 0x64, 0x65, 0x18, 0x05, 0x20, 0x01, 0x28, 0x0e, 0x32, 0x1e, 0x2e, 0x67, 0x72,
+	0x69, 0x6e, 0x74, 0x61, 0x2e, 0x76, 0x31, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x31, 0x2e, 0x4e, 0x61,
+	0x6d, 0x65, 0x43, 0x6c, 0x61, 0x69, 0x6d, 0x4d, 0x6f, 0x64, 0x65, 0x52, 0x04, 0x6d, 0x6f, 0x64,
+	0x65, 0x22, 0x54, 0x0a, 0x12, 0x4e, 0x61, 0x6d, 0x65, 0x4f, 0x77, 0x6e, 0x65, 0x72, 0x73, 0x68,
+	0x69, 0x70, 0x51, 0x75, 0x65, 0x72, 0x79, 0x12, 0x23, 0x0a, 0x0d, 0x65, 0x6e, 0x64, 0x70, 0x6f,
+	0x69, 0x6e, 0x74, 0x5f, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0c,
+	0x65, 0x6e, 0x64, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x4e, 0x61, 0x6d, 0x65, 0x12, 0x19, 0x0a, 0x08,
+	0x6c, 0x61, 0x73, 0x74, 0x5f, 0x72, 0x65, 0x76, 0x18, 0x02, 0x20, 0x01, 0x28, 0x04, 0x52, 0x07,
+	0x6c, 0x61, 0x73, 0x74, 0x52, 0x65, 0x76, 0x22, 0x80, 0x01, 0x0a, 0x15, 0x4e, 0x61, 0x6d, 0x65,
+	0x4f, 0x77, 0x6e, 0x65, 0x72, 0x73, 0x68, 0x69, 0x70, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73,
+	0x65, 0x12, 0x10, 0x0a, 0x03, 0x6f, 0x77, 0x6e, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x03,
+	0x6f, 0x77, 0x6e, 0x12, 0x23, 0x0a, 0x0d, 0x65, 0x6e, 0x64, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x5f,
+	0x6e, 0x61, 0x6d, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0c, 0x65, 0x6e, 0x64, 0x70,
+	0x6f, 0x69, 0x6e, 0x74, 0x4e, 0x61, 0x6d, 0x65, 0x12, 0x30, 0x0a, 0x05, 0x63, 0x6c, 0x61, 0x69,
+	0x6d, 0x18, 0x03, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x1a, 0x2e, 0x67, 0x72, 0x69, 0x6e, 0x74, 0x61,
+	0x2e, 0x76, 0x31, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x31, 0x2e, 0x4e, 0x61, 0x6d, 0x65, 0x43, 0x6c,
+	0x61, 0x69, 0x6d, 0x52, 0x05, 0x63, 0x6c, 0x61, 0x69, 0x6d, 0x2a, 0x57, 0x0a, 0x0a, 0x53, 0x74,
+	0x72, 0x65, 0x61, 0x6d, 0x4d, 0x6f, 0x64, 0x65, 0x12, 0x1b, 0x0a, 0x17, 0x53, 0x54, 0x52, 0x45,
+	0x41, 0x4d, 0x5f, 0x4d, 0x4f, 0x44, 0x45, 0x5f, 0x55, 0x4e, 0x53, 0x50, 0x45, 0x43, 0x49, 0x46,
+	0x49, 0x45, 0x44, 0x10, 0x00, 0x12, 0x16, 0x0a, 0x12, 0x53, 0x54, 0x52, 0x45, 0x41, 0x4d, 0x5f,
+	0x4d, 0x4f, 0x44, 0x45, 0x5f, 0x47, 0x4f, 0x53, 0x53, 0x49, 0x50, 0x10, 0x01, 0x12, 0x14, 0x0a,
+	0x10, 0x53, 0x54, 0x52, 0x45, 0x41, 0x4d, 0x5f, 0x4d, 0x4f, 0x44, 0x45, 0x5f, 0x46, 0x4c, 0x4f,
+	0x57, 0x10, 0x02, 0x2a, 0x68, 0x0a, 0x0d, 0x4e, 0x61, 0x6d, 0x65, 0x43, 0x6c, 0x61, 0x69, 0x6d,
+	0x4d, 0x6f, 0x64, 0x65, 0x12, 0x1f, 0x0a, 0x1b, 0x4e, 0x41, 0x4d, 0x45, 0x5f, 0x43, 0x4c, 0x41,
+	0x49, 0x4d, 0x5f, 0x4d, 0x4f, 0x44, 0x45, 0x5f, 0x55, 0x4e, 0x53, 0x50, 0x45, 0x43, 0x49, 0x46,
+	0x49, 0x45, 0x44, 0x10, 0x00, 0x12, 0x19, 0x0a, 0x15, 0x4e, 0x41, 0x4d, 0x45, 0x5f, 0x43, 0x4c,
+	0x41, 0x49, 0x4d, 0x5f, 0x4d, 0x4f, 0x44, 0x45, 0x5f, 0x43, 0x4c, 0x41, 0x49, 0x4d, 0x10, 0x01,
+	0x12, 0x1b, 0x0a, 0x17, 0x4e, 0x41, 0x4d, 0x45, 0x5f, 0x43, 0x4c, 0x41, 0x49, 0x4d, 0x5f, 0x4d,
+	0x4f, 0x44, 0x45, 0x5f, 0x55, 0x4e, 0x43, 0x4c, 0x41, 0x49, 0x4d, 0x10, 0x02, 0x42, 0x46, 0x5a,
+	0x3c, 0x67, 0x69, 0x74, 0x68, 0x75, 0x62, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x72, 0x61, 0x73, 0x6b,
+	0x79, 0x6c, 0x64, 0x2f, 0x67, 0x72, 0x69, 0x6e, 0x74, 0x61, 0x2f, 0x67, 0x65, 0x6e, 0x2f, 0x67,
+	0x72, 0x69, 0x6e, 0x74, 0x61, 0x2f, 0x76, 0x31, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x31, 0x3b, 0x67,
+	0x72, 0x69, 0x6e, 0x74, 0x61, 0x76, 0x31, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x31, 0x92, 0x03, 0x05,
+	0xd2, 0x3e, 0x02, 0x10, 0x03, 0x62, 0x08, 0x65, 0x64, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x73, 0x70,
+	0xe8, 0x07,
 }
 
-var file_grinta_v1alpha1_protocol_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_grinta_v1alpha1_protocol_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_grinta_v1alpha1_protocol_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_grinta_v1alpha1_protocol_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_grinta_v1alpha1_protocol_proto_goTypes = []any{
 	(StreamMode)(0),               // 0: grinta.v1alpha1.StreamMode
-	(*Frame)(nil),                 // 1: grinta.v1alpha1.Frame
-	(*InitFrame)(nil),             // 2: grinta.v1alpha1.InitFrame
-	(*GossipFrameNameRecord)(nil), // 3: grinta.v1alpha1.GossipFrameNameRecord
+	(NameClaimMode)(0),            // 1: grinta.v1alpha1.NameClaimMode
+	(*Frame)(nil),                 // 2: grinta.v1alpha1.Frame
+	(*InitFrame)(nil),             // 3: grinta.v1alpha1.InitFrame
+	(*NameClaim)(nil),             // 4: grinta.v1alpha1.NameClaim
+	(*NameOwnershipQuery)(nil),    // 5: grinta.v1alpha1.NameOwnershipQuery
+	(*NameOwnershipResponse)(nil), // 6: grinta.v1alpha1.NameOwnershipResponse
 }
 var file_grinta_v1alpha1_protocol_proto_depIdxs = []int32{
-	2, // 0: grinta.v1alpha1.Frame.init:type_name -> grinta.v1alpha1.InitFrame
+	3, // 0: grinta.v1alpha1.Frame.init:type_name -> grinta.v1alpha1.InitFrame
 	0, // 1: grinta.v1alpha1.InitFrame.mode:type_name -> grinta.v1alpha1.StreamMode
-	2, // [2:2] is the sub-list for method output_type
-	2, // [2:2] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	1, // 2: grinta.v1alpha1.NameClaim.mode:type_name -> grinta.v1alpha1.NameClaimMode
+	4, // 3: grinta.v1alpha1.NameOwnershipResponse.claim:type_name -> grinta.v1alpha1.NameClaim
+	4, // [4:4] is the sub-list for method output_type
+	4, // [4:4] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_grinta_v1alpha1_protocol_proto_init() }
@@ -567,8 +977,8 @@ func file_grinta_v1alpha1_protocol_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_grinta_v1alpha1_protocol_proto_rawDesc,
-			NumEnums:      1,
-			NumMessages:   3,
+			NumEnums:      2,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

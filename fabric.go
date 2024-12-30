@@ -7,19 +7,19 @@ import (
 	"time"
 
 	"github.com/hashicorp/serf/serf"
-	grintav1alpha1 "github.com/raskyld/grinta/gen/grinta/v1alpha1"
-	"google.golang.org/protobuf/proto"
 )
 
 const MaxEndpointLength = 128
+const MaxReasonBytes = 255
 
 var InvalidEndpointName = regexp.MustCompile(`[^A-Za-z0-9\-\.]+`)
 
 type Fabric struct {
-	config     config
-	serf       *serf.Serf
-	tr         *Transport
-	logger     *slog.Logger
+	config config
+	serf   *serf.Serf
+	tr     *Transport
+	logger *slog.Logger
+
 	eventCh    chan serf.Event
 	shutdownCh chan struct{}
 }
@@ -136,40 +136,19 @@ func (fb *Fabric) handleEvents() {
 		fb.logger.Debug("event received", "event_type", event.EventType().String(), "event", event.String())
 		switch event := event.(type) {
 		case serf.UserEvent:
-			if event.Name == "name_resolve" {
-				var nameRecord grintav1alpha1.GossipFrameNameRecord
-				err := proto.Unmarshal(event.Payload, &nameRecord)
-				if err != nil {
-					fb.logger.Error("failed to unmarshal an event", LabelError.L(err))
-				} else {
-					fb.logger.Info("discovered a new endpoint", "endpoint", nameRecord.GetEndpointName(), "on", nameRecord.GetNodeName())
-				}
+			switch event.Name {
+
+			default:
+				fb.logger.Error("received unexpected event", "event_name", event.Name)
 			}
 		}
 	}
 }
 
-func (fb *Fabric) announceEndpoint(name string) error {
-	if !ValidateEndpointName(name) {
-		return ErrNameInvalid
-	}
-
-	var msg grintav1alpha1.GossipFrameNameRecord
-	msg.SetEndpointName(name)
-	msg.SetNodeName(fb.config.serfCfg.NodeName)
-
-	buf, err := proto.Marshal(&msg)
-	if err != nil {
-		panic("could not marshal name record")
-	}
-
-	err = fb.serf.UserEvent("name_resolve", buf, true)
-	if err != nil {
-		return err
-	}
-	return nil
+func ValidateEndpointName(ep Endpoint) bool {
+	return ep != nil && !InvalidEndpointName.MatchString(ep.Name()) && len(ep.Name()) <= MaxEndpointLength
 }
 
-func ValidateEndpointName(name string) bool {
-	return !InvalidEndpointName.MatchString(name) || len(name) <= MaxEndpointLength
+func ValidateCloseReason(reason string) bool {
+	return len([]byte(reason)) <= MaxReasonBytes
 }

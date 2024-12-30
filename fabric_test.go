@@ -118,11 +118,6 @@ func TestFabric(t *testing.T) {
 		}, 10*time.Second, 1*time.Second)
 	})
 
-	fbNode1.announceEndpoint("cuteserviceon1")
-	fbNode2.announceEndpoint("gumpyon2")
-
-	time.Sleep(5 * time.Second)
-
 	fbNode1.Shutdown()
 	fbNode2.Shutdown()
 }

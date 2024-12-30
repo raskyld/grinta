@@ -31,9 +31,28 @@ enum StreamMode {
   STREAM_MODE_FLOW = 2;
 }
 
-// GossipFrameNameRecord is a mapping of an endpoint name to
-// a destination node.
-message GossipFrameNameRecord {
+// NameClaim is an event representing the claim of a node over a name.
+message NameClaim {
   string endpoint_name = 1;
   string node_name = 2;
+  uint64 rev = 3;
+  string reason = 4;
+  NameClaimMode mode = 5;
+}
+
+enum NameClaimMode {
+  NAME_CLAIM_MODE_UNSPECIFIED = 0;
+  NAME_CLAIM_MODE_CLAIM = 1;
+  NAME_CLAIM_MODE_UNCLAIM = 2;
+}
+
+message NameOwnershipQuery {
+  string endpoint_name = 1;
+  uint64 last_rev = 2;
+}
+
+message NameOwnershipResponse {
+  bool own = 1;
+  string endpoint_name = 2;
+  NameClaim claim = 3;
 }

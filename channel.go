@@ -1,11 +1,31 @@
 package grinta
 
 import (
+	"context"
 	"net"
+	"sync"
 
 	"github.com/quic-go/quic-go"
 	grintav1alpha1 "github.com/raskyld/grinta/gen/grinta/v1alpha1"
 )
+
+// Endpoint is resolvable on a `Fabric` and allows the owner to
+// `Accept` inbound `Channel`.
+type Endpoint interface {
+	Name() string
+	Accept(context.Context) (Chan, error)
+	Close(cause ClosedError) error
+}
+
+// Chan is the equivalent of Go built-in chan, with the following
+// additions:
+//
+// * They are bidirectional.
+// * Their two end can be in different process,
+//   - If both end are in the same process, it falls back to native channel;
+//   - If they are in different processes, the messages are `Marshal()`-ed
+//     over the `Fabric`.
+type Chan interface{}
 
 type streamWrapper struct {
 	mode        grintav1alpha1.StreamMode
@@ -44,4 +64,36 @@ func (gs *streamWrapper) garbageCollector(closer <-chan struct{}) {
 		// and streams have transmitted their frames.
 		gs.Close()
 	}
+}
+
+type endpoint struct {
+	fb          *Fabric
+	name        string
+	closed      bool
+	closeReason ClosedError
+	closeCh     chan struct{}
+	lock        sync.Mutex
+}
+
+func (ep *endpoint) Name() string {
+	return ep.name
+}
+
+func (ep *endpoint) Accept(context.Context) (Chan, error) {
+	return nil, nil
+}
+
+func (ep *endpoint) Close(cause ClosedError) error {
+	ep.lock.Lock()
+	if ep.closed {
+		// no-op
+		ep.lock.Unlock()
+		return nil
+	}
+
+	ep.closed = true
+	ep.closeReason = cause
+	ep.lock.Unlock()
+	close(ep.closeCh)
+	return nil
 }

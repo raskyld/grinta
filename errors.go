@@ -10,8 +10,14 @@ import (
 var (
 	ErrNameInvalid = errors.New("fabric: names must only contains alphanum, dashes, dots and be less than 128 chars")
 
-	ErrInvalidCfg  = errors.New("fabric: invalid options")
-	ErrJoinCluster = errors.New("fabric: could not join cluster")
+	ErrInvalidCfg         = errors.New("fabric: invalid options")
+	ErrJoinCluster        = errors.New("fabric: could not join cluster")
+	ErrFabricInvalidFrame = errors.New("fabric: invalid gossip frame")
+	ErrNameConflict       = errors.New("fabric: endpoint name conflict")
+	ErrNameResolution     = errors.New("fabric: endpoint does not exist")
+
+	ErrGossipInProgress = errors.New("gossip: query in progress")
+	ErrGossipTimeout    = errors.New("gossip: query timed out")
 
 	ErrBufferSize        = errors.New("transport: could not allocate udp buffer")
 	ErrHostnameResolve   = errors.New("transport: could not resolve hostname from certificate")
@@ -47,6 +53,13 @@ var (
 	}
 )
 
+const (
+	ClosedByUnknown ClosedBy = iota
+	ClosedByEPRenamed
+	ClosedByUser
+	ClosedByRemote
+)
+
 type QuicApplicationError struct {
 	Code   uint64
 	Prefix string
@@ -60,4 +73,41 @@ func (qerr *QuicApplicationError) Close(conn quic.Connection, msg string) error 
 		)
 	}
 	return nil
+}
+
+type ClosedBy uint8
+
+func (cause ClosedBy) String() string {
+	switch cause {
+	case ClosedByEPRenamed:
+		return "endpoint being overriden by another"
+	case ClosedByUser:
+		return "explicit user close"
+	case ClosedByRemote:
+		return "remote"
+	default:
+		return "unknown"
+	}
+}
+
+type ClosedError struct {
+	cause ClosedBy
+	msg   string
+}
+
+func (endErr *ClosedError) Error() string {
+	return fmt.Sprintf("chan closed by %s: %s", endErr.cause, endErr.msg)
+}
+
+// CloseEndpointBecause returns an error to pass to
+// `Endpoint.Close`
+func CloseEndpointBecause(msg string) ClosedError {
+	if msg == "" {
+		msg = "no reason provided"
+	}
+
+	return ClosedError{
+		cause: ClosedByUser,
+		msg:   msg,
+	}
 }

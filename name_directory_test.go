@@ -70,9 +70,9 @@ func TestNameDirectory_Resolution(t *testing.T) {
 	require.NoError(t, t1.record(ep2, false))
 	require.NoError(t, t1.record(ep3, true))
 
-	rest1, err1 := t1.resolve("ep1")
-	rest2, err2 := t1.resolve("ep2")
-	_, err3 := t1.resolve("ep3")
+	rest1, _, err1 := t1.resolve("ep1")
+	rest2, _, err2 := t1.resolve("ep2")
+	_, _, err3 := t1.resolve("ep3")
 
 	require.NoError(t, err1)
 	require.NoError(t, err2)

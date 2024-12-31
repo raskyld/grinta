@@ -8,6 +8,7 @@ import (
 )
 
 var (
+	ErrChanClosed  = errors.New("chan: stream was closed")
 	ErrNameInvalid = errors.New("fabric: names must only contains alphanum, dashes, dots and be less than 128 chars")
 
 	ErrInvalidCfg             = errors.New("fabric: invalid options")
@@ -30,8 +31,10 @@ var (
 	ErrTooLargeFrame     = errors.New("transport: frame was too large could not send")
 )
 
-var (
-	QErrStreamProtocolViolation = quic.StreamErrorCode(0xFF)
+const (
+	QErrStreamProtocolViolation     = quic.StreamErrorCode(0xF)
+	QErrStreamEndpointDoesNotExists = quic.StreamErrorCode(0x4)
+	QErrStreamClosed                = quic.StreamErrorCode(0xC)
 )
 
 var (
@@ -95,8 +98,8 @@ type ClosedError struct {
 	msg   string
 }
 
-func (endErr *ClosedError) Error() string {
-	return fmt.Sprintf("chan closed by %s: %s", endErr.cause, endErr.msg)
+func (endErr ClosedError) Error() string {
+	return fmt.Sprintf("closed by %s: %s", endErr.cause, endErr.msg)
 }
 
 // CloseEndpointBecause returns an error to pass to

@@ -84,19 +84,19 @@ func (dir *nameDirectory) getNamesWithConflict() (conflicts []string) {
 	return
 }
 
-func (dir *nameDirectory) resolve(name string) (string, error) {
+func (dir *nameDirectory) resolve(name string) (string, *grintav1alpha1.NameClaim, error) {
 	dir.lk.RLock()
 	defer dir.lk.RUnlock()
 	currentNode, has := dir.d.Get(name)
 	if !has {
-		return "", ErrNameResolution
+		return "", nil, ErrNameResolution
 	}
 
 	if len(currentNode.owner) > 0 {
-		return currentNode.owner, nil
+		return currentNode.owner, currentNode.history[currentNode.owner], nil
 	}
 
-	return "", ErrNameResolution
+	return "", nil, ErrNameResolution
 }
 
 func (dir *nameDirectory) scan(prefix string) (found []string, err error) {

@@ -304,6 +304,44 @@ func (t *Transport) DialAddressTimeout(addr memberlist.Address, timeout time.Dur
 	return t.initialiseOutboundStream(ctx, stream, hcx, initFrame)
 }
 
+func (t *Transport) DialFlow(addr string, timeout time.Duration, source, dest string) (net.Conn, error) {
+	if t.gracefulTerm.Load() {
+		return nil, ErrShutdown
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	hcx, err := t.getActiveCx(ctx, memberlist.Address{
+		Addr: addr,
+	})
+	mLabels := append(t.cfg.MetricLabels, LabelPeerAddr.M(addr), LabelPerspective.M(ClientPerspective.String()))
+	if err != nil {
+		t.msink.IncrCounterWithLabels(
+			MetricSErr,
+			1.0,
+			append(mLabels, LabelError.M("no_conn_to_host")),
+		)
+		return nil, err
+	}
+
+	stream, err := hcx.OpenStreamSync(ctx)
+	if err != nil {
+		t.msink.IncrCounterWithLabels(
+			MetricSErr,
+			1.0,
+			append(mLabels, LabelError.M("cannot_open_stream")),
+		)
+		return nil, err
+	}
+
+	initFrame := &grintav1alpha1.InitFrame{}
+	initFrame.SetMode(grintav1alpha1.StreamMode_STREAM_MODE_FLOW)
+	initFrame.SetSrcName(source)
+	initFrame.SetDestName(dest)
+
+	return t.initialiseOutboundStream(ctx, stream, hcx, initFrame)
+}
+
 func (t *Transport) StreamCh() <-chan net.Conn {
 	return t.streamCh
 }

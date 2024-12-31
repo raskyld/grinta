@@ -1,6 +1,7 @@
 package grinta
 
 import (
+	"bufio"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -26,12 +27,20 @@ type Fabric struct {
 
 	eventCh    chan serf.Event
 	shutdownCh chan struct{}
+
+	localEPs map[string]*endpoint
+	epGC     chan *endpoint
+
+	lk sync.Mutex
+	wg sync.WaitGroup
 }
 
 func Create(opts ...Option) (*Fabric, error) {
 	fb := &Fabric{
 		eventCh:    make(chan serf.Event, 512),
 		shutdownCh: make(chan struct{}, 1),
+		localEPs:   make(map[string]*endpoint),
+		epGC:       make(chan *endpoint),
 	}
 
 	// Fine-tune Serf config.
@@ -90,8 +99,11 @@ func Create(opts ...Option) (*Fabric, error) {
 	}
 	fb.serf = serf
 
-	// Handle cluster events.
+	// Handle cluster events and inbound flow.
+	fb.wg.Add(3)
 	go fb.handleEvents()
+	go fb.handleEndpointGC()
+	go fb.handleFlow()
 
 	// Create our name dir.
 	fb.dir = newNameDir(fb.logger, fb, fb.config.serfCfg.NodeName)
@@ -133,6 +145,7 @@ func (fb *Fabric) Shutdown() error {
 }
 
 func (fb *Fabric) handleEvents() {
+	defer fb.wg.Done()
 	for {
 		var event serf.Event
 		select {
@@ -156,7 +169,118 @@ func (fb *Fabric) handleEvents() {
 			default:
 				fb.logger.Error("received unexpected event", "event_name", event.Name)
 			}
+		case *serf.Query:
+			switch event.Name {
+			case "resolve_endpoint":
+				query := &grintav1alpha1.NameOwnershipQuery{}
+				err := proto.Unmarshal(event.Payload, query)
+				if err != nil {
+					fb.logger.Error("failed to unmarshal a query", LabelError.L(err))
+				} else if !query.HasEndpointName() {
+					fb.logger.Warn("received an empty query", LabelPeerName.L(event.SourceNode()))
+				} else {
+					response := &grintav1alpha1.NameOwnershipResponse{}
+					_, claim, _ := fb.dir.resolve(query.GetEndpointName())
+					if claim != nil {
+						response.SetClaim(claim)
+					}
+					payload, err := proto.Marshal(response)
+					if err != nil {
+						fb.logger.Error("failed to marshal a response", LabelError.L(err))
+					} else {
+						err = event.Respond(payload)
+						if err != nil {
+							fb.logger.Error("failed to answer to a query", LabelError.L(err))
+						}
+					}
+				}
+			default:
+				fb.logger.Error("received unexpected query", "query_name", event.Name)
+			}
 		}
+	}
+}
+
+func (fb *Fabric) handleFlow() {
+	defer fb.wg.Done()
+	for {
+		var flow *streamWrapper
+		select {
+		case flow = <-fb.tr.flowCh:
+		case <-fb.shutdownCh:
+			return
+		}
+		fb.lk.Lock()
+		ep, exists := fb.localEPs[flow.destination]
+		fb.lk.Unlock()
+
+		if !exists {
+			flow.Stream.CancelRead(QErrStreamEndpointDoesNotExists)
+			flow.Stream.CancelWrite(QErrStreamEndpointDoesNotExists)
+			continue
+		}
+
+		ep.lock.Lock()
+		if !ep.closed {
+			ep.inCh <- &RemoteChan{
+				stream: flow,
+				buf:    bufio.NewReader(flow.Stream),
+			}
+		} else {
+			flow.Stream.CancelRead(QErrStreamEndpointDoesNotExists)
+			flow.Stream.CancelWrite(QErrStreamEndpointDoesNotExists)
+		}
+		ep.lock.Unlock()
+	}
+}
+
+func (fb *Fabric) handleEndpointGC() {
+	defer fb.wg.Done()
+	for {
+		var ep *endpoint
+		select {
+		case ep = <-fb.epGC:
+		case <-fb.shutdownCh:
+			return
+		}
+
+		fb.lk.Lock()
+		fbEp, has := fb.localEPs[ep.name]
+		if has {
+			if fbEp == ep {
+				delete(fb.localEPs, ep.name)
+			} else {
+				// we already reclaimed the name with another endpoint.
+				fb.lk.Unlock()
+				continue
+			}
+		}
+
+		record := &grintav1alpha1.NameClaim{}
+		record.SetNodeName(fb.config.serfCfg.NodeName)
+		record.SetMode(grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_UNCLAIM)
+		record.SetEndpointName(ep.name)
+
+		err := fb.dir.record(record, true)
+		fb.lk.Unlock()
+		if err != nil {
+			// requeue for retry
+			fb.epGC <- ep
+			continue
+		}
+
+		payload, err := proto.Marshal(record)
+		if err != nil {
+			panic(fmt.Sprintf("unexpected fail to marshal: %s", err))
+		}
+
+		err = fb.serf.UserEvent("name_record", payload, true)
+		if err != nil {
+			// requeue for retry
+			fb.epGC <- ep
+		}
+
+		fb.logger.Debug("released endpoint", LabelEndpointName.L(ep.name))
 	}
 }
 
@@ -165,19 +289,25 @@ func (fb *Fabric) CreateEndpoint(name string) (Endpoint, error) {
 		return nil, ErrNameInvalid
 	}
 
+	fb.lk.Lock()
+	defer fb.lk.Unlock()
+	_, has := fb.localEPs[name]
+	if has {
+		return nil, ErrNameConflict
+	}
 	record := &grintav1alpha1.NameClaim{}
 	record.SetNodeName(fb.config.serfCfg.NodeName)
 	record.SetMode(grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_CLAIM)
 	record.SetEndpointName(name)
 
+	err := fb.dir.record(record, true)
+	if err != nil {
+		return nil, err
+	}
+
 	payload, err := proto.Marshal(record)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrFabricInvalidFrame, err)
-	}
-
-	err = fb.dir.record(record, true)
-	if err != nil {
-		return nil, err
 	}
 
 	err = fb.serf.UserEvent("name_record", payload, true)
@@ -185,11 +315,14 @@ func (fb *Fabric) CreateEndpoint(name string) (Endpoint, error) {
 		return nil, err
 	}
 
-	return &endpoint{
-		fb:      fb,
-		name:    name,
-		closeCh: make(chan struct{}, 1),
-	}, nil
+	ep := &endpoint{
+		epGC: fb.epGC,
+		name: name,
+		inCh: make(chan Chan),
+	}
+
+	fb.localEPs[name] = ep
+	return ep, nil
 }
 
 func (fb *Fabric) ResolveEndpoint(req ResolveEndpointRequest) (*ResolveEndpointQuery, error) {

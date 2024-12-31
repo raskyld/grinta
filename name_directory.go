@@ -22,67 +22,24 @@ type nameDirectory struct {
 	activeConflicts map[string]*conflictRecord
 	conflictTimeout time.Duration
 	conflictTicker  *time.Ticker
+	wg              sync.WaitGroup
 
 	logger        *slog.Logger
-	gossip        nameGossip
+	fb            FabricControlPlane
 	localNodeName string
 }
 
 type nameRecord struct {
-	active          *grintav1alpha1.NameClaim
-	claimantHistory map[string]*grintav1alpha1.NameClaim
-
-	// lc has a "level" which is the last claiment's name
-	// the "edge" is when we last saw a change between the "level"
-	// (i.e., a different claimant).
-	// this knowledge is useful to see if there is recent contention
-	// about a name.
-	lcLevel string
-	lcEdge  time.Time
-}
-
-type nameGossip interface {
-	// askConsensus to all peers, they will dump their most recent claim
-	// for the specified endpoint name, so we can follow majority.
-	//
-	// If a split-brain occurs (no clear majority), default to give ownership
-	// to lexico-smallest host name.
-	askConsensus(epName string) (uint64, error)
-
-	// confirmClaim ask a specific peer to confirm its ownership of a name.
-	//
-	// A revision can be provided so the peer only need to send its claim back
-	// if a more recent revision is available.
-	confirmClaim(peer, epName string, lastRev uint64) (uint64, error)
-
-	getConsensusResult(id uint64) (*consensusResult, error)
-	getClaimResult(id uint64) (*grintav1alpha1.NameOwnershipResponse, error)
-
-	cancel(id uint64)
-}
-
-type consensusResult struct {
-	activePerHost map[string]*grintav1alpha1.NameClaim
-	answers       int
-	clusterSize   int
+	owner   string
+	history map[string]*grintav1alpha1.NameClaim
 }
 
 type conflictRecord struct {
 	deadline time.Time
-	id       uint64
+	query    *ResolveEndpointQuery
 }
 
-type voteKey struct {
-	host string
-	mode grintav1alpha1.NameClaimMode
-}
-
-type voteVal struct {
-	count      int
-	mostRecent *grintav1alpha1.NameClaim
-}
-
-func newNameDir(logger *slog.Logger, gossip nameGossip, localNodeName string) *nameDirectory {
+func newNameDir(logger *slog.Logger, fabric FabricControlPlane, localNodeName string) *nameDirectory {
 	dir := &nameDirectory{
 		d:               NewTree[*nameRecord](),
 		activeConflicts: make(map[string]*conflictRecord),
@@ -90,16 +47,17 @@ func newNameDir(logger *slog.Logger, gossip nameGossip, localNodeName string) *n
 		conflictTimeout: 10 * time.Second,
 		conflictTicker:  time.NewTicker(1 * time.Second),
 		closeCh:         make(chan struct{}, 1),
-		gossip:          gossip,
+		fb:              fabric,
 		localNodeName:   localNodeName,
 	}
 
+	dir.wg.Add(1)
 	go dir.handleConflicts()
 
 	return dir
 }
 
-func newTestableNameDir(logger *slog.Logger, gossip nameGossip, localNodeName string) *nameDirectory {
+func newTestableNameDir(logger *slog.Logger, fabric FabricControlPlane, localNodeName string) *nameDirectory {
 	dir := &nameDirectory{
 		d:               NewTree[*nameRecord](),
 		activeConflicts: make(map[string]*conflictRecord),
@@ -107,10 +65,11 @@ func newTestableNameDir(logger *slog.Logger, gossip nameGossip, localNodeName st
 		conflictTimeout: 3 * time.Second,
 		conflictTicker:  time.NewTicker(200 * time.Millisecond),
 		closeCh:         make(chan struct{}, 1),
-		gossip:          gossip,
+		fb:              fabric,
 		localNodeName:   localNodeName,
 	}
 
+	dir.wg.Add(1)
 	go dir.handleConflicts()
 
 	return dir
@@ -133,8 +92,8 @@ func (dir *nameDirectory) resolve(name string) (string, error) {
 		return "", ErrNameResolution
 	}
 
-	if currentNode.active.GetMode() == grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_CLAIM {
-		return currentNode.active.GetNodeName(), nil
+	if len(currentNode.owner) > 0 {
+		return currentNode.owner, nil
 	}
 
 	return "", ErrNameResolution
@@ -144,7 +103,7 @@ func (dir *nameDirectory) scan(prefix string) (found []string, err error) {
 	dir.lk.RLock()
 	defer dir.lk.RUnlock()
 	for name, currentNode := range dir.d.WalkPrefix(prefix) {
-		if currentNode.active.GetMode() == grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_CLAIM {
+		if len(currentNode.owner) > 0 {
 			found = append(found, name)
 		}
 	}
@@ -177,81 +136,90 @@ func (dir *nameDirectory) record(claim *grintav1alpha1.NameClaim, synchronous bo
 
 	currentNode, has := dir.d.Get(name)
 	if has {
-		// If the claimant is the one we have in our local state, there is
-		// no problem.
-		if currentNode.active.GetNodeName() == claimant {
-			if rev > currentNode.active.GetRev() {
-				currentNode.active = claim
+		// In all case, we update the history of the node.
+		history, hasHistory := currentNode.history[claimant]
+		if hasHistory {
+			if rev > history.GetRev() {
+				currentNode.history[claimant] = claim
 			}
 		} else {
-			// We conservatively store history to prepare for any potential conflict.
-			if currentNode.claimantHistory == nil {
-				currentNode.claimantHistory = map[string]*grintav1alpha1.NameClaim{
-					currentNode.active.GetNodeName(): currentNode.active,
-				}
-			}
-
-			// If we try to apply a claim on a recently unclaimed name,
-			// our local state can be reconciled.
-			if currentNode.active.GetMode() == grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_UNCLAIM &&
-				claim.GetMode() == grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_CLAIM {
-				currentNode.active = claim
-			} else {
-				// Applying this is not possible, if we are in synchronous mode
-				// we can just abort.
-				if synchronous {
-					return ErrNameConflict
-				}
-
-				// Otherwise, we enable conflict mode and wait in case the
-				// cluster converge to resolution.
-				conflict, ok := dir.activeConflicts[name]
-				if ok {
-					if conflict.deadline.Before(now) {
-						dir.logger.Debug(
-							"conflict hard resolution happens next tick",
-							"endpoint_name", name,
-						)
-					} else {
-						dir.logger.Debug(
-							"time before conflict hard resolution",
-							"duration", time.Until(conflict.deadline),
-							"endpoint_name", name,
-						)
-					}
-				} else {
-					dir.activeConflicts[name] = &conflictRecord{
-						deadline: now.Add(dir.conflictTimeout),
-					}
-					dir.logger.Debug("endpoint name conflict detected", "endpoint_name", name)
-				}
-			}
+			currentNode.history[claimant] = claim
 		}
 
-		if currentNode.claimantHistory != nil {
-			if currentNode.lcLevel != claimant {
-				currentNode.lcLevel = claimant
-				currentNode.lcEdge = now
+		// Should never happen, but better be exhaustive.
+		if claim.GetMode() == grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_UNSPECIFIED {
+			dir.logger.Warn("unexpected claim received")
+			return nil
+		}
+
+		// If the unclaim comes from the current owner, we just free the node.
+		// If there is a mismatch, it is safe to ignore it since we already stored
+		// the unclaim event in the history.
+		if claim.GetMode() == grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_UNCLAIM {
+			if currentNode.owner == claim.GetNodeName() {
+				currentNode.owner = ""
 			}
-			historical, hasHistorical := currentNode.claimantHistory[claimant]
-			if hasHistorical {
-				if rev > historical.GetRev() {
-					currentNode.claimantHistory[claimant] = claim
-				}
+			return nil
+		}
+
+		// If we try to apply a claim on a recently unclaimed name,
+		// our local state can be reconciled.
+		if len(currentNode.owner) == 0 {
+			currentNode.owner = claim.GetNodeName()
+		}
+
+		// Idempotency rule: You MAY claim a name you already own.
+		if currentNode.owner == claim.GetNodeName() {
+			return nil
+		}
+
+		// At this point, we have a conflict.
+
+		// If we are in synchronous mode, we can just abort.
+		if synchronous {
+			return ErrNameConflict
+		}
+
+		// Otherwise, we enable conflict mode and wait in case the
+		// cluster converge to resolution.
+		conflict, ok := dir.activeConflicts[name]
+		if ok {
+			if conflict.deadline.Before(now) {
+				dir.logger.Debug(
+					"conflict hard resolution happens next tick",
+					LabelEndpointName.L(name),
+				)
 			} else {
-				currentNode.claimantHistory[claimant] = claim
+				dir.logger.Debug(
+					"time before conflict hard resolution",
+					LabelDuration.L(conflict.deadline),
+					LabelEndpointName.L(name),
+				)
 			}
+		} else {
+			dir.activeConflicts[name] = &conflictRecord{
+				deadline: now.Add(dir.conflictTimeout),
+			}
+			dir.logger.Debug("endpoint name conflict detected", LabelEndpointName.L(name))
 		}
 	} else {
-		dir.d.Insert(name, &nameRecord{
-			active:          claim,
-			claimantHistory: nil,
-		})
+		record := &nameRecord{
+			history: map[string]*grintav1alpha1.NameClaim{
+				claimant: claim,
+			},
+		}
+
+		if claim.GetMode() == grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_CLAIM {
+			record.owner = claimant
+		}
+
+		dir.d.Insert(name, record)
 	}
 	return nil
 }
 
 func (dir *nameDirectory) handleConflicts() {
+	defer dir.wg.Done()
 	for {
 		select {
 		case <-dir.conflictTicker.C:
@@ -264,137 +232,96 @@ func (dir *nameDirectory) handleConflicts() {
 			for epName, conflict := range dir.activeConflicts {
 				node, has := dir.d.Get(epName)
 				if !has {
-					if conflict.id != 0 {
-						dir.gossip.cancel(conflict.id)
+					if conflict.query != nil {
+						conflict.query.Close()
 					}
 					delete(dir.activeConflicts, epName)
 					continue
 				}
 
 				var uniqueClaim *grintav1alpha1.NameClaim
-				var resolved bool
-				for _, claim := range node.claimantHistory {
+				resolved := true
+				for _, claim := range node.history {
 					if claim.GetMode() == grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_CLAIM {
 						if uniqueClaim != nil {
 							// we still have two different claimants, conflict
 							// is not resolved.
 							resolved = false
-							continue
+							break
 						}
-
-						resolved = true
 						uniqueClaim = claim
 					}
 				}
 
 				if resolved {
-					dir.logger.Debug("conflict resolved", "endpoint_name", epName)
-					if conflict.id != 0 {
-						dir.gossip.cancel(conflict.id)
+					if uniqueClaim != nil {
+						node.owner = uniqueClaim.GetNodeName()
+					} else {
+						node.owner = ""
 					}
+
+					dir.logger.Debug(
+						"conflict resolved",
+						LabelEndpointName.L(epName),
+						LabelPeerName.L(node.owner),
+					)
+
+					if conflict.query != nil {
+						conflict.query.Close()
+					}
+
 					delete(dir.activeConflicts, epName)
 					continue
 				}
 
 				if conflict.deadline.Before(now) {
-					if conflict.id != 0 {
-						result, err := dir.gossip.getConsensusResult(conflict.id)
-						if err != nil {
-							if errors.Is(err, ErrGossipInProgress) {
-								// retry next tick
-								continue
-							}
-
-							dir.logger.Error("failed consensus, retry next tick", LabelError.L(err))
-							conflict.id = 0
+					if conflict.query != nil {
+						if !conflict.query.Finished() {
 							continue
 						}
 
-						answerRate := float64(result.answers) / float64(result.clusterSize)
-						if answerRate < 0.67 {
-							dir.logger.Error("failed consensus, not enough participation", "participation_rate", answerRate)
-							conflict.id = 0
+						response := <-conflict.query.ResponseCh()
+						if response == nil {
+							dir.logger.Error("failed consensus, unexpected close, retry next tick")
+							conflict.query = nil
 							continue
 						}
 
-						_, hasMyVote := result.activePerHost[dir.localNodeName]
-						if !hasMyVote {
-							result.activePerHost[dir.localNodeName] = node.active
-						}
-
-						votes := make(map[voteKey]*voteVal)
-						var highest *voteVal
-						for _, vote := range result.activePerHost {
-							if vote.HasNodeName() && vote.HasMode() {
-								key := voteKey{host: vote.GetNodeName(), mode: vote.GetMode()}
-								curr, ok := votes[key]
-								if !ok {
-									curr = &voteVal{
-										count:      1,
-										mostRecent: vote,
-									}
-									votes[key] = curr
-								} else {
-									curr.count = curr.count + 1
-									if vote.HasRev() && (!curr.mostRecent.HasRev() || vote.GetRev() > curr.mostRecent.GetRev()) {
-										curr.mostRecent = vote
-									}
-								}
-
-								if highest == nil || curr.count > highest.count {
-									highest = curr
-								}
+						if response.Error != nil {
+							if errors.Is(response.Error, ErrNameResolution) {
+								// Nobody claims the name, we can just remove the node.
+								dir.d.Delete(epName)
+								delete(dir.activeConflicts, epName)
+								dir.logger.Debug("endpoint freed after conflict", LabelEndpointName.L(epName))
+							} else {
+								dir.logger.Error("failed consensus, retry next tick", LabelError.L(response.Error))
+								conflict.query = nil
 							}
-						}
-
-						if highest == nil {
-							dir.logger.Error("failed consensus, no participation")
-							conflict.id = 0
 							continue
 						}
 
-						if highest.count >= result.answers/2+1 {
-							dir.logger.Info(
-								"majority reached, conflict solved",
-								"owner", highest.mostRecent.GetNodeName(),
-								"endpoint_name", highest.mostRecent.GetEndpointName(),
-								"mode", highest.mostRecent.GetMode().String(),
-							)
-						} else {
-							highest = nil
-							lowestClaimentName := ""
-							for k, vote := range votes {
-								if lowestClaimentName == "" || k.host < lowestClaimentName {
-									highest = vote
-									lowestClaimentName = k.host
-								}
-							}
-
-							dir.logger.Info(
-								"majority not reached, solving conflict by tie breaking",
-								"owner", highest.mostRecent.GetNodeName(),
-								"endpoint_name", highest.mostRecent.GetEndpointName(),
-								"mode", highest.mostRecent.GetMode().String(),
-							)
-						}
-
-						node.active = highest.mostRecent
-						node.claimantHistory = nil
-						node.lcEdge = time.Time{}
-						node.lcLevel = ""
+						node.owner = response.Host
+						node.history[response.Host] = response.claim
 						delete(dir.activeConflicts, epName)
+						dir.logger.Info(
+							"endpoint name conflict solved",
+							LabelEndpointName.L(epName),
+							LabelPeerName.L(response.Host),
+						)
 					} else {
 						dir.logger.Warn(
 							"cannot fix an endpoint conflict alone, initiating a cluster vote",
 							"endpoint_name", epName,
 						)
-						id, err := dir.gossip.askConsensus(epName)
+						rq, err := dir.fb.ResolveEndpoint(ResolveEndpointRequest{
+							EndpointName: epName,
+						})
 						if err != nil {
 							dir.logger.Error("could not init a vote, retry next tick", LabelError.L(err))
 							continue
 						}
 
-						conflict.id = id
+						conflict.query = rq
 					}
 				}
 			}
@@ -407,4 +334,5 @@ func (dir *nameDirectory) handleConflicts() {
 
 func (dir *nameDirectory) close() {
 	close(dir.closeCh)
+	dir.wg.Wait()
 }

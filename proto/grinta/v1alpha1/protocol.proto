@@ -48,11 +48,8 @@ enum NameClaimMode {
 
 message NameOwnershipQuery {
   string endpoint_name = 1;
-  uint64 last_rev = 2;
 }
 
 message NameOwnershipResponse {
-  bool own = 1;
-  string endpoint_name = 2;
-  NameClaim claim = 3;
+  NameClaim claim = 1;
 }

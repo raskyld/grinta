@@ -10,14 +10,14 @@ import (
 var (
 	ErrNameInvalid = errors.New("fabric: names must only contains alphanum, dashes, dots and be less than 128 chars")
 
-	ErrInvalidCfg         = errors.New("fabric: invalid options")
-	ErrJoinCluster        = errors.New("fabric: could not join cluster")
-	ErrFabricInvalidFrame = errors.New("fabric: invalid gossip frame")
-	ErrNameConflict       = errors.New("fabric: endpoint name conflict")
-	ErrNameResolution     = errors.New("fabric: endpoint does not exist")
-
-	ErrGossipInProgress = errors.New("gossip: query in progress")
-	ErrGossipTimeout    = errors.New("gossip: query timed out")
+	ErrInvalidCfg             = errors.New("fabric: invalid options")
+	ErrQueryInvalid           = errors.New("fabric: query is invalid")
+	ErrQueryClosed            = errors.New("fabric: query was closed by user")
+	ErrJoinCluster            = errors.New("fabric: could not join cluster")
+	ErrFabricInvalidFrame     = errors.New("fabric: invalid gossip frame")
+	ErrNameConflict           = errors.New("fabric: endpoint name conflict")
+	ErrNameResolution         = errors.New("fabric: endpoint does not exist")
+	ErrNotEnoughParticipation = errors.New("fabric: not enough cluster participation")
 
 	ErrBufferSize        = errors.New("transport: could not allocate udp buffer")
 	ErrHostnameResolve   = errors.New("transport: could not resolve hostname from certificate")

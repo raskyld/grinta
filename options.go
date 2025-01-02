@@ -149,9 +149,9 @@ func WithDialTimeout(timeout time.Duration) Option {
 func WithGracePeriod(period time.Duration) Option {
 	return func(c *config) error {
 		if period == 0 {
-			period = 10 * time.Second
+			period = 4 * time.Second
 		}
-		c.trCfg.GracePeriod = period
+		c.serfCfg.LeavePropagateDelay = period
 		return nil
 	}
 }

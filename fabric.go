@@ -1,7 +1,7 @@
 package grinta
 
 import (
-	"bufio"
+	"context"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -25,28 +25,38 @@ type Fabric struct {
 	logger *slog.Logger
 	dir    *nameDirectory
 
-	eventCh    chan serf.Event
-	shutdownCh chan struct{}
+	eventCh chan serf.Event
 
+	// endpoints management
 	localEPs map[string]*endpoint
 	epGC     chan *endpoint
 
+	// synchronisation
 	lk sync.Mutex
-	wg sync.WaitGroup
+
+	// 2-phase close:
+	// phase 1: shutdown notification, graceful termination.
+	// phase 2: drop, all resources are freed.
+	shutdown   bool
+	shutdownCh chan struct{}
+	dropCh     chan struct{}
+	wg         sync.WaitGroup
 }
 
 func Create(opts ...Option) (*Fabric, error) {
 	fb := &Fabric{
-		eventCh:    make(chan serf.Event, 512),
+		eventCh:  make(chan serf.Event, 512),
+		localEPs: make(map[string]*endpoint),
+		epGC:     make(chan *endpoint),
+
 		shutdownCh: make(chan struct{}, 1),
-		localEPs:   make(map[string]*endpoint),
-		epGC:       make(chan *endpoint),
+		dropCh:     make(chan struct{}, 1),
 	}
 
 	// Fine-tune Serf config.
 	fb.config.serfCfg = serf.DefaultConfig()
 	// We will wait for QUIC buffers to flush anyway.
-	fb.config.serfCfg.LeavePropagateDelay = 1 * time.Second
+	fb.config.serfCfg.LeavePropagateDelay = 4 * time.Second
 	fb.config.serfCfg.LogOutput = nil
 	fb.config.serfCfg.MemberlistConfig.ProbeTimeout = 2 * time.Second
 	// TODO(raskyld): handle back-pressure by slowing down events.
@@ -103,7 +113,7 @@ func Create(opts ...Option) (*Fabric, error) {
 	fb.wg.Add(3)
 	go fb.handleEvents()
 	go fb.handleEndpointGC()
-	go fb.handleFlow()
+	go fb.handleChan()
 
 	// Create our name dir.
 	fb.dir = newNameDir(fb.logger, fb, fb.config.serfCfg.NodeName)
@@ -112,23 +122,28 @@ func Create(opts ...Option) (*Fabric, error) {
 }
 
 func (fb *Fabric) JoinCluster() error {
+	fb.lk.Lock()
+	defer fb.lk.Unlock()
+	if fb.shutdown {
+		return ErrFabricClosed
+	}
 	if len(fb.config.neighbours) > 0 {
 		joined, err := fb.serf.Join(fb.config.neighbours, true)
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrJoinCluster, err)
 		}
-		fb.logger.Info("joined cluster")
+		fb.logger.Info("cluster joined")
 		if len(fb.config.neighbours) != joined {
 			fb.logger.Warn(
-				"have not succeeded joining all neighbours",
+				"not all neighbours are reachable",
 				"joined", joined,
 				"expected", len(fb.config.neighbours),
 			)
 		}
-	} else {
-		fb.logger.Warn("no neighbours specified, cannot join cluster")
+		return nil
 	}
-	return nil
+
+	return fmt.Errorf("%w: %s", ErrJoinCluster, "no neighbours provided")
 }
 
 func (fb *Fabric) Topology() []serf.Member {
@@ -136,11 +151,30 @@ func (fb *Fabric) Topology() []serf.Member {
 }
 
 func (fb *Fabric) Shutdown() error {
-	fb.serf.Leave()
-	fb.serf.Shutdown()
-	<-fb.serf.ShutdownCh()
-	fb.dir.close()
+	// Phase 1: Shutdown notify.
+	fb.lk.Lock()
+	if fb.shutdown {
+		fb.lk.Unlock()
+		return nil
+	}
+	fb.shutdown = true
 	close(fb.shutdownCh)
+	fb.lk.Unlock()
+	start := time.Now()
+	fb.logger.Info("shutting down...")
+	fb.logger.Info("shutdown: leave cluster")
+	fb.serf.Leave()
+
+	// Phase 2: Drop all resources.
+	close(fb.dropCh)
+	fb.logger.Info("shutdown: release resources")
+	fb.serf.Shutdown()
+	fb.dir.close()
+
+	fb.logger.Info("shutdown: wait for resources")
+	fb.wg.Wait()
+	<-fb.serf.ShutdownCh()
+	fb.logger.Info("shutdown: completed", LabelDuration.L(time.Since(start)))
 	return nil
 }
 
@@ -150,7 +184,7 @@ func (fb *Fabric) handleEvents() {
 		var event serf.Event
 		select {
 		case event = <-fb.eventCh:
-		case <-fb.shutdownCh:
+		case <-fb.dropCh:
 			return
 		}
 
@@ -201,36 +235,35 @@ func (fb *Fabric) handleEvents() {
 	}
 }
 
-func (fb *Fabric) handleFlow() {
+func (fb *Fabric) handleChan() {
 	defer fb.wg.Done()
 	for {
-		var flow *streamWrapper
+		// TODO(raskyld): add metrics
+		var stream *streamWrapper
 		select {
-		case flow = <-fb.tr.flowCh:
+		case stream = <-fb.tr.chanCh:
 		case <-fb.shutdownCh:
+			fb.logger.Info("shutdown: stop accepting inbound flow establishments")
 			return
 		}
 		fb.lk.Lock()
-		ep, exists := fb.localEPs[flow.destination]
+		ep, exists := fb.localEPs[stream.destination]
 		fb.lk.Unlock()
 
 		if !exists {
-			flow.Stream.CancelRead(QErrStreamEndpointDoesNotExists)
-			flow.Stream.CancelWrite(QErrStreamEndpointDoesNotExists)
+			stream.Stream.CancelRead(QErrStreamEndpointDoesNotExists)
+			stream.Stream.CancelWrite(QErrStreamEndpointDoesNotExists)
 			continue
 		}
 
-		ep.lock.Lock()
+		ep.lk.Lock()
 		if !ep.closed {
-			ep.inCh <- &RemoteChan{
-				stream: flow,
-				buf:    bufio.NewReader(flow.Stream),
-			}
+			ep.flowCh <- newRemoteChan(stream)
 		} else {
-			flow.Stream.CancelRead(QErrStreamEndpointDoesNotExists)
-			flow.Stream.CancelWrite(QErrStreamEndpointDoesNotExists)
+			stream.Stream.CancelRead(QErrStreamEndpointDoesNotExists)
+			stream.Stream.CancelWrite(QErrStreamEndpointDoesNotExists)
 		}
-		ep.lock.Unlock()
+		ep.lk.Unlock()
 	}
 }
 
@@ -241,6 +274,13 @@ func (fb *Fabric) handleEndpointGC() {
 		select {
 		case ep = <-fb.epGC:
 		case <-fb.shutdownCh:
+			fb.logger.Info("shutdown: close all local endpoints")
+			fb.lk.Lock()
+			for _, ep := range fb.localEPs {
+				ep.close()
+			}
+			fb.lk.Unlock()
+			close(fb.epGC)
 			return
 		}
 
@@ -291,6 +331,9 @@ func (fb *Fabric) CreateEndpoint(name string) (Endpoint, error) {
 
 	fb.lk.Lock()
 	defer fb.lk.Unlock()
+	if fb.shutdown {
+		return nil, ErrFabricClosed
+	}
 	_, has := fb.localEPs[name]
 	if has {
 		return nil, ErrNameConflict
@@ -315,19 +358,74 @@ func (fb *Fabric) CreateEndpoint(name string) (Endpoint, error) {
 		return nil, err
 	}
 
-	ep := &endpoint{
-		epGC: fb.epGC,
-		name: name,
-		inCh: make(chan Chan),
-	}
-
+	ep := newEndpoint(name, fb.epGC)
 	fb.localEPs[name] = ep
 	return ep, nil
+}
+
+func (fb *Fabric) DialEndpoint(ctx context.Context, name string) (Flow, error) {
+	if !ValidateEndpointName(name) {
+		return nil, ErrNameInvalid
+	}
+
+	fb.lk.Lock()
+	shutdown := fb.shutdown
+	fb.lk.Unlock()
+	if shutdown {
+		return nil, ErrFabricClosed
+	}
+
+	owner, _, err := fb.dir.resolve(name)
+	if err != nil {
+		return nil, err
+	}
+
+	if owner == fb.config.serfCfg.NodeName {
+		fb.lk.Lock()
+		ep, has := fb.localEPs[name]
+		fb.lk.Unlock()
+		if !has {
+			return nil, ErrNameResolution
+		}
+		server, client := newLocalChan()
+		ep.lk.Lock()
+		defer ep.lk.Unlock()
+		if ep.closed {
+			return nil, ErrNameResolution
+		}
+		ep.flowCh <- server
+		return client, nil
+	}
+
+	nodes := fb.serf.Members()
+	var nodeAddr string
+	for _, node := range nodes {
+		if node.Name == owner {
+			nodeAddr = fmt.Sprintf("%s:%d", node.Addr, node.Port)
+		}
+	}
+
+	if nodeAddr == "" {
+		return nil, fmt.Errorf("%w: %s", ErrHostNotFound, owner)
+	}
+
+	stream, err := fb.tr.dialFlow(ctx, nodeAddr, name)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrDialFailed, err)
+	}
+	return newRemoteChan(stream), nil
 }
 
 func (fb *Fabric) ResolveEndpoint(req ResolveEndpointRequest) (*ResolveEndpointQuery, error) {
 	if !ValidateEndpointName(req.EndpointName) {
 		return nil, ErrNameInvalid
+	}
+
+	fb.lk.Lock()
+	shutdown := fb.shutdown
+	fb.lk.Unlock()
+	if shutdown {
+		return nil, ErrFabricClosed
 	}
 
 	query := &grintav1alpha1.NameOwnershipQuery{}

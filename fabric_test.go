@@ -1,15 +1,23 @@
 package grinta
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"log/slog"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+type TestString string
+
+func (ts TestString) Marshal() ([]byte, error) {
+	return []byte(ts), nil
+}
 
 func TestFabric(t *testing.T) {
 	n1handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
@@ -27,8 +35,7 @@ func TestFabric(t *testing.T) {
 	})
 
 	caKey := generateKeyPair(t)
-	node1Key := generateKeyPair(t)
-	node2Key := generateKeyPair(t)
+	leafKey := generateKeyPair(t)
 
 	caDER := generateCa(t, caKey)
 	ca, err := x509.ParseCertificate(caDER)
@@ -37,42 +44,22 @@ func TestFabric(t *testing.T) {
 		return
 	}
 
-	node1DER := generateLeaf(t, ca, caKey, node1Key, "node1")
-	node1, err := x509.ParseCertificate(node1DER)
+	leafDER := generateLeaf(t, ca, caKey, leafKey, "leaf")
+	leafCert, err := x509.ParseCertificate(leafDER)
 	if err != nil {
 		t.Fatalf("failed to parse node1: %s", err)
-		return
-	}
-
-	node2DER := generateLeaf(t, ca, caKey, node2Key, "node2")
-	node2, err := x509.ParseCertificate(node2DER)
-	if err != nil {
-		t.Fatalf("failed to parse node2: %s", err)
 		return
 	}
 
 	caPool := x509.NewCertPool()
 	caPool.AddCert(ca)
 
-	tcN1 := &tls.Config{
+	tlsConf := &tls.Config{
 		Certificates: []tls.Certificate{
 			{
-				Certificate: [][]byte{node1DER},
-				Leaf:        node1,
-				PrivateKey:  node1Key,
-			},
-		},
-		ClientAuth: tls.RequireAndVerifyClientCert,
-		ClientCAs:  caPool,
-		RootCAs:    caPool,
-	}
-
-	tcN2 := &tls.Config{
-		Certificates: []tls.Certificate{
-			{
-				Certificate: [][]byte{node2DER},
-				Leaf:        node2,
-				PrivateKey:  node2Key,
+				Certificate: [][]byte{leafDER},
+				Leaf:        leafCert,
+				PrivateKey:  leafKey,
 			},
 		},
 		ClientAuth: tls.RequireAndVerifyClientCert,
@@ -84,7 +71,7 @@ func TestFabric(t *testing.T) {
 		WithNodeName("node1"),
 		WithListenOn("127.0.0.1", 6021),
 		WithLog(n1handler),
-		WithTlsConfig(tcN1),
+		WithTlsConfig(tlsConf),
 		WithNeighbours([]string{"localhost:6022"}),
 		WithMetricSink(nil),
 	)
@@ -97,7 +84,7 @@ func TestFabric(t *testing.T) {
 		WithNodeName("node2"),
 		WithListenOn("127.0.0.1", 6022),
 		WithLog(n2handler),
-		WithTlsConfig(tcN2),
+		WithTlsConfig(tlsConf),
 		WithNeighbours([]string{"localhost:6021"}),
 		WithMetricSink(nil),
 	)
@@ -116,6 +103,44 @@ func TestFabric(t *testing.T) {
 			}
 			return false
 		}, 10*time.Second, 1*time.Second)
+	})
+
+	ep, err := fbNode1.CreateEndpoint("srv1")
+	values := make(chan interface{})
+	require.NoError(t, err)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			rcv, err := ep.Accept(context.Background())
+			if err != nil {
+				t.Logf("error when accepting: %s", err)
+				break
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					val, err := rcv.Read(context.Background())
+					if err != nil {
+						break
+					}
+					values <- val
+				}
+				rcv.Close()
+			}()
+		}
+		ep.Close()
+	}()
+
+	t.Run("node1 can dial endpoint srv1 which is local", func(t *testing.T) {
+		prod, err := fbNode1.DialEndpoint(context.Background(), "srv1")
+		require.NoError(t, err)
+		prod.Write(context.Background(), TestString("hello!"))
+		val := <-values
+		castedVal := val.(TestString)
+		require.Equal(t, "hello!", string(castedVal))
 	})
 
 	fbNode1.Shutdown()

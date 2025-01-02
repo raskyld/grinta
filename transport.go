@@ -4,13 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/go-metrics"
@@ -47,10 +47,6 @@ type TransportConfig struct {
 	// Default to 10 seconds.
 	DialTimeout time.Duration
 
-	// GracePeriod is how much time we accept to wait for stream buffers to
-	// get flushed. Default to 2 seconds.
-	GracePeriod time.Duration
-
 	// LogHandler to use for emitting structured logs.
 	LogHandler slog.Handler
 }
@@ -61,11 +57,10 @@ type Transport struct {
 	logger *slog.Logger
 	msink  metrics.MetricSink
 
-	// graceful termination asked, do not spam of connection error in logs
-	gracefulTerm atomic.Bool
+	wg sync.WaitGroup
 
 	// GRINTA protocol
-	flowCh    chan *streamWrapper
+	chanCh    chan *streamWrapper
 	hostsCxs  map[string][]hostCx
 	hostsLock sync.RWMutex
 
@@ -82,11 +77,7 @@ type Transport struct {
 	udpLn *net.UDPConn
 }
 
-type hostCx struct {
-	// closeCh is closed to wake-up stream garbage collectors.
-	closeCh chan struct{}
-	quic.Connection
-}
+type hostCx quic.Connection
 
 type Perspective uint8
 
@@ -102,7 +93,7 @@ func NewTransport(cfg *TransportConfig) (trans *Transport, err error) {
 
 	t := &Transport{
 		cfg:      cfg,
-		flowCh:   make(chan *streamWrapper),
+		chanCh:   make(chan *streamWrapper),
 		hostsCxs: make(map[string][]hostCx),
 		packetCh: make(chan *memberlist.Packet),
 		streamCh: make(chan net.Conn),
@@ -122,10 +113,6 @@ func NewTransport(cfg *TransportConfig) (trans *Transport, err error) {
 
 	if cfg.DialTimeout == 0 {
 		cfg.DialTimeout = 10 * time.Second
-	}
-
-	if cfg.GracePeriod == 0 {
-		cfg.GracePeriod = 2 * time.Second
 	}
 
 	defer func() {
@@ -184,6 +171,7 @@ func NewTransport(cfg *TransportConfig) (trans *Transport, err error) {
 	}
 
 	t.ln = ln
+	t.wg.Add(1)
 	go t.acceptCx()
 	return t, err
 }
@@ -223,10 +211,6 @@ func (t *Transport) WriteTo(b []byte, addr string) (time.Time, error) {
 }
 
 func (t *Transport) WriteToAddress(b []byte, addr memberlist.Address) (time.Time, error) {
-	if t.gracefulTerm.Load() {
-		return time.Time{}, ErrShutdown
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), t.cfg.DialTimeout)
 	defer cancel()
 	conn, err := t.getActiveCx(ctx, addr)
@@ -271,10 +255,6 @@ func (t *Transport) DialTimeout(addr string, timeout time.Duration) (net.Conn, e
 }
 
 func (t *Transport) DialAddressTimeout(addr memberlist.Address, timeout time.Duration) (net.Conn, error) {
-	if t.gracefulTerm.Load() {
-		return nil, ErrShutdown
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	hcx, err := t.getActiveCx(ctx, addr)
@@ -304,13 +284,7 @@ func (t *Transport) DialAddressTimeout(addr memberlist.Address, timeout time.Dur
 	return t.initialiseOutboundStream(ctx, stream, hcx, initFrame)
 }
 
-func (t *Transport) DialFlow(addr string, timeout time.Duration, source, dest string) (net.Conn, error) {
-	if t.gracefulTerm.Load() {
-		return nil, ErrShutdown
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func (t *Transport) dialFlow(ctx context.Context, addr string, dest string) (*streamWrapper, error) {
 	hcx, err := t.getActiveCx(ctx, memberlist.Address{
 		Addr: addr,
 	})
@@ -336,7 +310,6 @@ func (t *Transport) DialFlow(addr string, timeout time.Duration, source, dest st
 
 	initFrame := &grintav1alpha1.InitFrame{}
 	initFrame.SetMode(grintav1alpha1.StreamMode_STREAM_MODE_FLOW)
-	initFrame.SetSrcName(source)
 	initFrame.SetDestName(dest)
 
 	return t.initialiseOutboundStream(ctx, stream, hcx, initFrame)
@@ -348,28 +321,12 @@ func (t *Transport) StreamCh() <-chan net.Conn {
 
 // Shutdown initiate a graceful termination.
 func (t *Transport) Shutdown() error {
-	if !t.gracefulTerm.CompareAndSwap(false, true) {
-		// no-op because it was already shutdown
-		return nil
-	}
-
-	t.logger.Info("shutting down...", "gracePeriod", t.cfg.GracePeriod.String())
-	t.hostsLock.Lock()
-	for _, cxs := range t.hostsCxs {
-		for _, cx := range cxs {
-			close(cx.closeCh)
-		}
-	}
-	t.hostsLock.Unlock()
-
-	// dumb SO_LINGER like behaviour until it is implemented
-	// in go-quic
-	time.Sleep(t.cfg.GracePeriod)
+	t.ln.Close()
 
 	t.hostsLock.Lock()
 	for _, cxs := range t.hostsCxs {
 		for _, cx := range cxs {
-			QErrShutdown.Close(cx.Connection, "we are shutting down! bye!")
+			QErrShutdown.Close(cx, "shutting down")
 		}
 	}
 	t.hostsLock.Unlock()
@@ -385,13 +342,15 @@ func (t *Transport) Shutdown() error {
 }
 
 func (t *Transport) acceptCx() {
+	defer t.wg.Done()
 	for {
 		conn, err := t.ln.Accept(context.TODO())
-		if t.gracefulTerm.Load() {
-			break
-		}
 		if err != nil {
-			t.logger.Warn("unexpected QUIC listener closure", "error", err)
+			if errors.Is(err, quic.ErrServerClosed) {
+				t.logger.Info("shutdown: stop accepting new QUIC connections")
+			} else {
+				t.logger.Error("transport listener failed", "error", err)
+			}
 			break
 		}
 
@@ -400,8 +359,8 @@ func (t *Transport) acceptCx() {
 }
 
 func (t *Transport) waitForDatagrams(hcx hostCx) {
+	defer t.wg.Done()
 	peer := hcx.RemoteAddr().String()
-	ctx := hcx.Context()
 
 	logger := t.logger.With(
 		LabelPeerAddr.L(peer),
@@ -413,21 +372,19 @@ func (t *Transport) waitForDatagrams(hcx hostCx) {
 	)
 
 	for {
-		buf, err := hcx.ReceiveDatagram(ctx)
+		buf, err := hcx.ReceiveDatagram(context.Background())
 		ts := time.Now()
-		if t.gracefulTerm.Load() {
+
+		if hcx.Context().Err() != nil {
+			t.msink.IncrCounterWithLabels(
+				MetricDErr,
+				1.0,
+				append(mLabels, LabelError.M("connection_broken")),
+			)
 			break
 		}
 
 		if err != nil {
-			if ctx.Err() != nil {
-				t.msink.IncrCounterWithLabels(
-					MetricDErr,
-					1.0,
-					append(mLabels, LabelError.M("connection_broken")),
-				)
-				break
-			}
 			t.msink.IncrCounterWithLabels(
 				MetricDErr,
 				1.0,
@@ -458,8 +415,8 @@ func (t *Transport) waitForDatagrams(hcx hostCx) {
 }
 
 func (t *Transport) handleStreams(hcx hostCx) {
+	defer t.wg.Done()
 	peer := hcx.RemoteAddr().String()
-	ctx := hcx.Context()
 
 	logger := t.logger.With(
 		LabelPeerAddr.L(peer),
@@ -471,22 +428,17 @@ func (t *Transport) handleStreams(hcx hostCx) {
 	)
 
 	for {
-		stream, err := hcx.AcceptStream(ctx)
-		if t.gracefulTerm.Load() {
+		stream, err := hcx.AcceptStream(context.Background())
+		if cerr := hcx.Context().Err(); cerr != nil {
+			logger.Warn("connection was broken", LabelError.L(cerr))
+			t.msink.IncrCounterWithLabels(
+				MetricSErr,
+				1.0,
+				append(mLabels, LabelError.M("connection_broken")),
+			)
 			break
 		}
-
 		if err != nil {
-			if ctx.Err() != nil {
-				logger.Warn("connection was broken", LabelError.L(ctx.Err()))
-				t.msink.IncrCounterWithLabels(
-					MetricSErr,
-					1.0,
-					append(mLabels, LabelError.M("connection_broken")),
-				)
-				break
-			}
-
 			logger.Warn("transient error accepting stream", LabelError.L(err))
 			t.msink.IncrCounterWithLabels(
 				MetricSErr,
@@ -498,8 +450,10 @@ func (t *Transport) handleStreams(hcx hostCx) {
 
 		// NB: we offload the stream establishment in another goroutine to avoid
 		// a misbehaving peer from blocking us.
+		t.wg.Add(1)
 		go func() {
-			initCtx, cancel := context.WithTimeout(ctx, t.cfg.DialTimeout)
+			defer t.wg.Done()
+			initCtx, cancel := context.WithTimeout(context.Background(), t.cfg.DialTimeout)
 			defer cancel()
 			swrap, err := t.initialiseInboundStream(initCtx, stream, hcx)
 			if err != nil {
@@ -511,7 +465,7 @@ func (t *Transport) handleStreams(hcx hostCx) {
 			case grintav1alpha1.StreamMode_STREAM_MODE_GOSSIP:
 				t.streamCh <- swrap
 			case grintav1alpha1.StreamMode_STREAM_MODE_FLOW:
-				t.flowCh <- swrap
+				t.chanCh <- swrap
 			}
 		}()
 	}
@@ -535,16 +489,12 @@ func (t *Transport) getActiveCx(
 func (t *Transport) dial(ctx context.Context, target string) (hostCx, error) {
 	addr, err := net.ResolveUDPAddr("udp", target)
 	if err != nil {
-		return hostCx{}, fmt.Errorf("%w: %w", ErrInvalidAddr, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidAddr, err)
 	}
 
 	cx, err := t.tr.Dial(ctx, addr, t.cfg.TlsConfig, t.qconf)
-	if t.gracefulTerm.Load() {
-		return hostCx{}, ErrShutdown
-	}
 	if err != nil {
-		t.logger.Warn("failed to dial", LabelPeerAddr.L(target))
-		return hostCx{}, err
+		return nil, err
 	}
 
 	return t.handleConn(cx, ClientPerspective)
@@ -585,7 +535,7 @@ func (t *Transport) garbageCollectCxs(target string) ([]hostCx, bool) {
 func (t *Transport) firstActiveCx(target string) (hostCx, bool) {
 	cxs, hasCxs := t.hostsCxs[target]
 	if !hasCxs {
-		return hostCx{}, false
+		return nil, false
 	}
 
 	for _, cx := range cxs {
@@ -594,19 +544,15 @@ func (t *Transport) firstActiveCx(target string) (hostCx, bool) {
 		}
 	}
 
-	return hostCx{}, false
+	return nil, false
 }
 
 func (t *Transport) handleConn(conn quic.Connection, perspective Perspective) (hostCx, error) {
-	hcx := hostCx{
-		closeCh:    make(chan struct{}, 1),
-		Connection: conn,
-	}
 	peer := conn.RemoteAddr().String()
 
 	t.hostsLock.Lock()
 	gcHost, _ := t.garbageCollectCxs(peer)
-	t.hostsCxs[peer] = append(gcHost, hcx)
+	t.hostsCxs[peer] = append(gcHost, conn)
 	t.hostsLock.Unlock()
 
 	t.msink.IncrCounterWithLabels(
@@ -619,10 +565,10 @@ func (t *Transport) handleConn(conn quic.Connection, perspective Perspective) (h
 		With(LabelPeerAddr.L(peer), LabelPerspective.L(perspective.String())).
 		Info("new connection established")
 
-	// NB: it's ok to pass by value, the struct is just two cheap pointers.
-	go t.waitForDatagrams(hcx)
-	go t.handleStreams(hcx)
-	return hcx, nil
+	t.wg.Add(2)
+	go t.waitForDatagrams(conn)
+	go t.handleStreams(conn)
+	return conn, nil
 }
 
 func (t *Transport) initialiseOutboundStream(
@@ -631,7 +577,7 @@ func (t *Transport) initialiseOutboundStream(
 	hcx hostCx,
 	initFrame *grintav1alpha1.InitFrame,
 ) (*streamWrapper, error) {
-	peerAddr := hcx.Connection.RemoteAddr().String()
+	peerAddr := hcx.RemoteAddr().String()
 	logger := t.logger.With(
 		LabelStreamID.L(stream.StreamID()),
 		LabelPeerAddr.L(peerAddr),
@@ -659,6 +605,7 @@ func (t *Transport) initialiseOutboundStream(
 		stream.SetWriteDeadline(dl)
 	}
 
+	// TODO(raskyld): write in one-pass to avoid partial write.
 	vn, err := stream.Write(sizeVarint)
 	if err != nil {
 		t.msink.IncrCounterWithLabels(
@@ -704,21 +651,19 @@ func (t *Transport) initialiseOutboundStream(
 		return nil, ErrTooLargeFrame
 	}
 
-	logger.Debug("new stream established")
 	t.msink.IncrCounterWithLabels(
 		MetricSCount,
 		1.0,
 		mLabels,
 	)
 
-	swrap := &streamWrapper{
-		localAddr:  hcx.LocalAddr(),
-		remoteAddr: hcx.RemoteAddr(),
-		Stream:     stream,
-	}
-
-	go swrap.garbageCollector(hcx.closeCh)
-	return swrap, nil
+	return newStreamWrapper(
+		stream,
+		hcx.LocalAddr(),
+		hcx.RemoteAddr(),
+		initFrame.GetMode(),
+		initFrame.GetDestName(),
+	), nil
 }
 
 func (t *Transport) initialiseInboundStream(
@@ -726,7 +671,7 @@ func (t *Transport) initialiseInboundStream(
 	stream quic.Stream,
 	hcx hostCx,
 ) (*streamWrapper, error) {
-	peerAddr := hcx.Connection.RemoteAddr().String()
+	peerAddr := hcx.RemoteAddr().String()
 	logger := t.logger.With(
 		LabelStreamID.L(stream.StreamID()),
 		LabelPeerAddr.L(peerAddr),
@@ -748,21 +693,16 @@ func (t *Transport) initialiseInboundStream(
 	var n int
 	for {
 		m, err := stream.Read(sizeBytes[n : n+1])
-		if t.gracefulTerm.Load() {
-			return nil, ErrShutdown
+		if serr := stream.Context().Err(); serr != nil {
+			logger.Warn("stream was broken", LabelError.L(serr))
+			t.msink.IncrCounterWithLabels(
+				MetricSErr,
+				1.0,
+				append(mLabels, LabelError.M("stream_broken")),
+			)
+			return nil, serr
 		}
-
 		if err != nil {
-			if serr := stream.Context().Err(); serr != nil {
-				logger.Warn("stream was broken", LabelError.L(serr))
-				t.msink.IncrCounterWithLabels(
-					MetricSErr,
-					1.0,
-					append(mLabels, LabelError.M("stream_broken")),
-				)
-				return nil, serr
-			}
-
 			if ctx.Err() != nil {
 				t.msink.IncrCounterWithLabels(
 					MetricSErr,
@@ -774,7 +714,6 @@ func (t *Transport) initialiseInboundStream(
 
 			logger.Warn("transient error reading stream", LabelError.L(err))
 		}
-
 		if m > 0 {
 			byteRead := sizeBytes[n]
 			n = n + m
@@ -790,27 +729,21 @@ func (t *Transport) initialiseInboundStream(
 		return nil, fmt.Errorf("%w: %w", ErrProtocolViolation, protowire.ParseError(rdVarint))
 	}
 
-	// First we want to read the size to know how much we need to allocate.
 	frameBytes := make([]byte, sizeVarint)
 	n = 0
 	for {
 		m, err := stream.Read(frameBytes[n:])
 		n = n + m
-		if t.gracefulTerm.Load() {
-			return nil, ErrShutdown
+		if serr := stream.Context().Err(); serr != nil {
+			logger.Warn("stream was broken", LabelError.L(serr))
+			t.msink.IncrCounterWithLabels(
+				MetricSErr,
+				1.0,
+				append(mLabels, LabelError.M("stream_broken")),
+			)
+			return nil, serr
 		}
-
 		if err != nil {
-			if serr := stream.Context().Err(); serr != nil {
-				logger.Warn("stream was broken", LabelError.L(serr))
-				t.msink.IncrCounterWithLabels(
-					MetricSErr,
-					1.0,
-					append(mLabels, LabelError.M("stream_broken")),
-				)
-				return nil, serr
-			}
-
 			if ctx.Err() != nil {
 				t.msink.IncrCounterWithLabels(
 					MetricSErr,
@@ -859,19 +792,14 @@ func (t *Transport) initialiseInboundStream(
 		return nil, ErrProtocolViolation
 	}
 
-	swrap := &streamWrapper{
-		mode:        initFrame.GetMode(),
-		localAddr:   hcx.LocalAddr(),
-		remoteAddr:  hcx.RemoteAddr(),
-		destination: initFrame.GetDestName(),
-		source:      initFrame.GetSrcName(),
+	swrap := newStreamWrapper(
+		stream,
+		hcx.LocalAddr(),
+		hcx.RemoteAddr(),
+		initFrame.GetMode(),
+		initFrame.GetDestName(),
+	)
 
-		Stream: stream,
-	}
-
-	go swrap.garbageCollector(hcx.closeCh)
-
-	logger.Debug("new stream established")
 	t.msink.IncrCounterWithLabels(
 		MetricSCount,
 		1.0,
@@ -889,4 +817,46 @@ func (p Perspective) String() string {
 		return "client"
 	}
 	panic("unreachable")
+}
+
+type streamWrapper struct {
+	mode        grintav1alpha1.StreamMode
+	localAddr   net.Addr
+	remoteAddr  net.Addr
+	destination string
+
+	// NB(raskyld): It is not clear from the go-quic docs and interface comments
+	// whether the stream is thread-safe, it states that Close MUST NOT
+	// be called concurrently with write, but looking at the implementation,
+	// it does use a mutex to sync Write/Close/Read operations, so I don't
+	// think we need to make it thread-safe ourselves.
+	// Furthermore, even though there is few (to none) reasons to call
+	// Write() and Read() concurrently, they have a 1-len channel to protect
+	// against concurrent uses.
+	quic.Stream
+}
+
+func newStreamWrapper(
+	stream quic.Stream,
+	localAddr, remoteAddr net.Addr,
+	mode grintav1alpha1.StreamMode,
+	dest string,
+) *streamWrapper {
+	st := &streamWrapper{
+		mode:        mode,
+		localAddr:   localAddr,
+		remoteAddr:  remoteAddr,
+		destination: dest,
+		Stream:      stream,
+	}
+
+	return st
+}
+
+func (stream *streamWrapper) LocalAddr() net.Addr {
+	return stream.localAddr
+}
+
+func (stream *streamWrapper) RemoteAddr() net.Addr {
+	return stream.remoteAddr
 }

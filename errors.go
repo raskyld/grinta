@@ -8,9 +8,11 @@ import (
 )
 
 var (
-	ErrChanClosed  = errors.New("chan: stream was closed")
-	ErrNameInvalid = errors.New("fabric: names must only contains alphanum, dashes, dots and be less than 128 chars")
+	ErrFlowClosed     = errors.New("flow closed")
+	ErrEndpointClosed = errors.New("endpoint closed")
+	ErrFabricClosed   = errors.New("fabric closed")
 
+	ErrNameInvalid            = errors.New("fabric: names must only contains alphanum, dashes, dots and be less than 128 chars")
 	ErrInvalidCfg             = errors.New("fabric: invalid options")
 	ErrQueryInvalid           = errors.New("fabric: query is invalid")
 	ErrQueryClosed            = errors.New("fabric: query was closed by user")
@@ -19,12 +21,13 @@ var (
 	ErrNameConflict           = errors.New("fabric: endpoint name conflict")
 	ErrNameResolution         = errors.New("fabric: endpoint does not exist")
 	ErrNotEnoughParticipation = errors.New("fabric: not enough cluster participation")
+	ErrHostNotFound           = errors.New("fabric: host not found")
+	ErrDialFailed             = errors.New("fabric: failed to dial remote endpoint")
 
 	ErrBufferSize        = errors.New("transport: could not allocate udp buffer")
-	ErrHostnameResolve   = errors.New("transport: could not resolve hostname from certificate")
 	ErrInvalidAddr       = errors.New("transport: the IP you provided is invalid")
 	ErrUdpNotAvailable   = errors.New("transport: UDP listener not available")
-	ErrShutdown          = errors.New("transport: shutting down")
+	ErrTransportShutdown = errors.New("transport: transport was closed")
 	ErrStreamWrite       = errors.New("transport: error writing to a stream")
 	ErrProtocolViolation = errors.New("transport: protocol violation")
 	ErrNoTLSConfig       = errors.New("transport: TlsConfig is required")
@@ -56,13 +59,6 @@ var (
 	}
 )
 
-const (
-	ClosedByUnknown ClosedBy = iota
-	ClosedByEPRenamed
-	ClosedByUser
-	ClosedByRemote
-)
-
 type QuicApplicationError struct {
 	Code   uint64
 	Prefix string
@@ -76,41 +72,4 @@ func (qerr *QuicApplicationError) Close(conn quic.Connection, msg string) error 
 		)
 	}
 	return nil
-}
-
-type ClosedBy uint8
-
-func (cause ClosedBy) String() string {
-	switch cause {
-	case ClosedByEPRenamed:
-		return "endpoint being overriden by another"
-	case ClosedByUser:
-		return "explicit user close"
-	case ClosedByRemote:
-		return "remote"
-	default:
-		return "unknown"
-	}
-}
-
-type ClosedError struct {
-	cause ClosedBy
-	msg   string
-}
-
-func (endErr ClosedError) Error() string {
-	return fmt.Sprintf("closed by %s: %s", endErr.cause, endErr.msg)
-}
-
-// CloseEndpointBecause returns an error to pass to
-// `Endpoint.Close`
-func CloseEndpointBecause(msg string) ClosedError {
-	if msg == "" {
-		msg = "no reason provided"
-	}
-
-	return ClosedError{
-		cause: ClosedByUser,
-		msg:   msg,
-	}
 }

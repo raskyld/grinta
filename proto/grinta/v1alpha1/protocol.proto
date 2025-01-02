@@ -20,7 +20,6 @@ message Frame {
 message InitFrame {
   StreamMode mode = 1;
   string dest_name = 2;
-  string src_name = 3;
 }
 
 // StreamMode describes whether a stream is used for internal
@@ -36,7 +35,6 @@ message NameClaim {
   string endpoint_name = 1;
   string node_name = 2;
   uint64 rev = 3;
-  string reason = 4;
   NameClaimMode mode = 5;
 }
 

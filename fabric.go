@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"regexp"
 	"sync"
 	"time"
@@ -19,11 +20,15 @@ const MaxReasonBytes = 255
 var InvalidEndpointName = regexp.MustCompile(`[^A-Za-z0-9\-\.]+`)
 
 type Fabric struct {
-	config config
-	serf   *serf.Serf
-	tr     *Transport
-	logger *slog.Logger
-	dir    *nameDirectory
+	config        config
+	serf          *serf.Serf
+	tr            *Transport
+	logger        *slog.Logger
+	dir           *nameDirectory
+	localIP       net.IP
+	localPort     int
+	localAddr     string
+	localNodeName string
 
 	eventCh chan serf.Event
 
@@ -82,6 +87,9 @@ func Create(opts ...Option) (*Fabric, error) {
 		}
 	}
 
+	fb.config.trCfg.BindAddr = fb.config.serfCfg.MemberlistConfig.BindAddr
+	fb.config.trCfg.BindPort = fb.config.serfCfg.MemberlistConfig.BindPort
+
 	// Logging implementations.
 	if fb.config.logHandler != nil {
 		fb.logger = slog.New(fb.config.logHandler)
@@ -109,6 +117,16 @@ func Create(opts ...Option) (*Fabric, error) {
 	}
 	fb.serf = serf
 
+	// Fetch our final advertised interfaces.
+	ip, port, err := tr.GetAdvertiseAddr()
+	if err != nil {
+		return nil, err
+	}
+	fb.localIP = ip
+	fb.localPort = port
+	fb.localAddr = fmt.Sprintf("%s:%d", ip, port)
+	fb.localNodeName = fb.serf.LocalMember().Name
+
 	// Handle cluster events and inbound flow.
 	fb.wg.Add(3)
 	go fb.handleEvents()
@@ -116,7 +134,7 @@ func Create(opts ...Option) (*Fabric, error) {
 	go fb.handleChan()
 
 	// Create our name dir.
-	fb.dir = newNameDir(fb.logger, fb, fb.config.serfCfg.NodeName)
+	fb.dir = newNameDir(fb.logger, fb, fb.localNodeName)
 
 	return fb, nil
 }
@@ -297,7 +315,7 @@ func (fb *Fabric) handleEndpointGC() {
 		}
 
 		record := &grintav1alpha1.NameClaim{}
-		record.SetNodeName(fb.config.serfCfg.NodeName)
+		record.SetNodeName(fb.localNodeName)
 		record.SetMode(grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_UNCLAIM)
 		record.SetEndpointName(ep.name)
 
@@ -339,7 +357,7 @@ func (fb *Fabric) CreateEndpoint(name string) (Endpoint, error) {
 		return nil, ErrNameConflict
 	}
 	record := &grintav1alpha1.NameClaim{}
-	record.SetNodeName(fb.config.serfCfg.NodeName)
+	record.SetNodeName(fb.localNodeName)
 	record.SetMode(grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_CLAIM)
 	record.SetEndpointName(name)
 
@@ -380,7 +398,7 @@ func (fb *Fabric) DialEndpoint(ctx context.Context, name string) (Flow, error) {
 		return nil, err
 	}
 
-	if owner == fb.config.serfCfg.NodeName {
+	if owner == fb.localNodeName {
 		fb.lk.Lock()
 		ep, has := fb.localEPs[name]
 		fb.lk.Unlock()
@@ -402,6 +420,7 @@ func (fb *Fabric) DialEndpoint(ctx context.Context, name string) (Flow, error) {
 	for _, node := range nodes {
 		if node.Name == owner {
 			nodeAddr = fmt.Sprintf("%s:%d", node.Addr, node.Port)
+			break
 		}
 	}
 

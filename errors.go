@@ -23,14 +23,15 @@ var (
 	ErrHostNotFound           = errors.New("fabric: host not found")
 	ErrDialFailed             = errors.New("fabric: failed to dial remote endpoint")
 
-	ErrBufferSize        = errors.New("transport: could not allocate udp buffer")
-	ErrInvalidAddr       = errors.New("transport: the IP you provided is invalid")
-	ErrUdpNotAvailable   = errors.New("transport: UDP listener not available")
-	ErrTransportShutdown = errors.New("transport: transport was closed")
-	ErrStreamWrite       = errors.New("transport: error writing to a stream")
-	ErrProtocolViolation = errors.New("transport: protocol violation")
-	ErrNoTLSConfig       = errors.New("transport: TlsConfig is required")
-	ErrTooLargeFrame     = errors.New("transport: frame was too large could not send")
+	ErrBufferSize             = errors.New("transport: could not allocate udp buffer")
+	ErrInvalidAddr            = errors.New("transport: the IP you provided is invalid")
+	ErrUdpNotAvailable        = errors.New("transport: UDP listener not available")
+	ErrTransportShutdown      = errors.New("transport: transport was closed")
+	ErrTransportNotAdvertised = errors.New("transport: transport was not advertised yet")
+	ErrStreamWrite            = errors.New("transport: error writing to a stream")
+	ErrProtocolViolation      = errors.New("transport: protocol violation")
+	ErrNoTLSConfig            = errors.New("transport: TlsConfig is required")
+	ErrTooLargeFrame          = errors.New("transport: frame was too large could not send")
 )
 
 const (

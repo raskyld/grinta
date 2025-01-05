@@ -170,7 +170,7 @@ func TestNewTransport(t *testing.T) {
 	ts1, err := NewTransport(&TransportConfig{
 		TlsConfig:  tcN1,
 		BindAddr:   "127.0.0.1",
-		BindPort:   6021,
+		BindPort:   6041,
 		MetricSink: node1Metrics,
 		LogHandler: n1handler,
 	})
@@ -178,11 +178,12 @@ func TestNewTransport(t *testing.T) {
 		t.Fatalf("failed to start node1: %s", err)
 		return
 	}
+	ts1.FinalAdvertiseAddr("", 0)
 
 	ts2, err := NewTransport(&TransportConfig{
 		TlsConfig:  tcN2,
 		BindAddr:   "127.0.0.1",
-		BindPort:   6022,
+		BindPort:   6042,
 		MetricSink: node2Metrics,
 		LogHandler: n2handler,
 	})
@@ -190,9 +191,10 @@ func TestNewTransport(t *testing.T) {
 		t.Fatalf("failed to start node2: %s", err)
 		return
 	}
+	ts2.FinalAdvertiseAddr("", 0)
 
 	t.Run("write datagram from n1 to n2", func(t *testing.T) {
-		_, err = ts1.WriteTo([]byte("hello"), "localhost:6022")
+		_, err = ts1.WriteTo([]byte("hello"), "localhost:6042")
 		require.NoError(t, err)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -208,7 +210,7 @@ func TestNewTransport(t *testing.T) {
 
 	t.Run("open stream from n2 to n1", func(t *testing.T) {
 		ts := time.Now()
-		conn, err := ts2.DialTimeout("localhost:6021", 1*time.Minute)
+		conn, err := ts2.DialTimeout("localhost:6041", 10*time.Second)
 		ts2 := time.Now()
 		require.NoError(t, err)
 		t.Logf("dialing took %s", ts2.Sub(ts).String())

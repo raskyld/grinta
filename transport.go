@@ -57,12 +57,16 @@ type Transport struct {
 	logger *slog.Logger
 	msink  metrics.MetricSink
 
+	finalAdvAddr net.IP
+	finalAdvPort int
+	finalAdvDone bool
+	lk           sync.RWMutex
+
 	wg sync.WaitGroup
 
 	// GRINTA protocol
-	chanCh    chan *streamWrapper
-	hostsCxs  map[string][]hostCx
-	hostsLock sync.RWMutex
+	chanCh   chan *streamWrapper
+	hostsCxs map[string][]hostCx
 
 	// Memberlist Protocol
 	packetCh chan *memberlist.Packet
@@ -133,10 +137,10 @@ func NewTransport(cfg *TransportConfig) (trans *Transport, err error) {
 
 	udpAddr := &net.UDPAddr{IP: addr, Port: port}
 	udpLn, err := net.ListenUDP("udp", udpAddr)
+	t.udpLn = udpLn
 	if err != nil {
 		return nil, fmt.Errorf("transport: failed to allocate UDP listener: %w", err)
 	}
-	t.udpLn = udpLn
 
 	t.tr = &quic.Transport{
 		Conn:                             udpLn,
@@ -176,9 +180,31 @@ func NewTransport(cfg *TransportConfig) (trans *Transport, err error) {
 	return t, err
 }
 
-func (t *Transport) FinalAdvertiseAddr(_ string, _ int) (net.IP, int, error) {
+func (t *Transport) FinalAdvertiseAddr(addr string, port int) (advIP net.IP, advPort int, err error) {
 	if t.udpLn == nil {
 		return nil, 0, ErrUdpNotAvailable
+	}
+
+	defer func() {
+		if err == nil {
+			t.lk.Lock()
+			t.finalAdvAddr = advIP
+			t.finalAdvPort = advPort
+			t.finalAdvDone = true
+			t.lk.Unlock()
+		}
+	}()
+
+	if addr != "" {
+		advIP = net.ParseIP(addr)
+	}
+
+	if port != 0 {
+		advPort = port
+	}
+
+	if advIP != nil && advPort != 0 {
+		return
 	}
 
 	ipPort := strings.Split(t.udpLn.LocalAddr().String(), ":")
@@ -192,16 +218,34 @@ func (t *Transport) FinalAdvertiseAddr(_ string, _ int) (net.IP, int, error) {
 		panic(fmt.Sprintf("go runtime produced invalid udp port %s", ipPort[1]))
 	}
 
-	advertiseAddr := net.ParseIP(ip)
-	if advertiseAddr == nil {
+	if advIP == nil {
+		advIP = net.ParseIP(ip)
+	}
+
+	if advIP == nil {
 		panic(fmt.Sprintf("go runtime produced invalid udp IP %s", ip))
 	}
 
-	if ip4 := advertiseAddr.To4(); ip4 != nil {
-		advertiseAddr = ip4
+	if ip4 := advIP.To4(); ip4 != nil {
+		advIP = ip4
 	}
 
-	return advertiseAddr, parsedPort, nil
+	if advPort == 0 {
+		advPort = parsedPort
+	}
+	return
+}
+
+func (t *Transport) GetAdvertiseAddr() (advIP net.IP, advPort int, err error) {
+	t.lk.RLock()
+	defer t.lk.RUnlock()
+
+	if !t.finalAdvDone {
+		err = ErrTransportNotAdvertised
+	}
+	advIP = t.finalAdvAddr
+	advPort = t.finalAdvPort
+	return
 }
 
 func (t *Transport) WriteTo(b []byte, addr string) (time.Time, error) {
@@ -321,15 +365,17 @@ func (t *Transport) StreamCh() <-chan net.Conn {
 
 // Shutdown initiate a graceful termination.
 func (t *Transport) Shutdown() error {
-	t.ln.Close()
+	if t.ln != nil {
+		t.ln.Close()
+	}
 
-	t.hostsLock.Lock()
+	t.lk.Lock()
 	for _, cxs := range t.hostsCxs {
 		for _, cx := range cxs {
 			QErrShutdown.Close(cx, "shutting down")
 		}
 	}
-	t.hostsLock.Unlock()
+	t.lk.Unlock()
 
 	if t.tr != nil {
 		t.tr.Close()
@@ -475,9 +521,13 @@ func (t *Transport) getActiveCx(
 	ctx context.Context,
 	target memberlist.Address,
 ) (hostCx, error) {
-	t.hostsLock.RLock()
+	t.lk.RLock()
+	if !t.finalAdvDone {
+		t.lk.RUnlock()
+		return nil, ErrTransportNotAdvertised
+	}
 	cx, hasCx := t.firstActiveCx(target.Addr)
-	t.hostsLock.RUnlock()
+	t.lk.RUnlock()
 
 	if hasCx {
 		return cx, nil
@@ -550,10 +600,14 @@ func (t *Transport) firstActiveCx(target string) (hostCx, bool) {
 func (t *Transport) handleConn(conn quic.Connection, perspective Perspective) (hostCx, error) {
 	peer := conn.RemoteAddr().String()
 
-	t.hostsLock.Lock()
+	t.lk.Lock()
+	if !t.finalAdvDone {
+		t.lk.Unlock()
+		return nil, ErrTransportNotAdvertised
+	}
 	gcHost, _ := t.garbageCollectCxs(peer)
 	t.hostsCxs[peer] = append(gcHost, conn)
-	t.hostsLock.Unlock()
+	t.lk.Unlock()
 
 	t.msink.IncrCounterWithLabels(
 		MetricConnCount,

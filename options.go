@@ -27,17 +27,16 @@ func WithListenOn(addr string, port int) Option {
 	return func(c *config) error {
 		c.serfCfg.MemberlistConfig.BindAddr = addr
 		c.serfCfg.MemberlistConfig.BindPort = port
-		c.trCfg.BindAddr = addr
-		c.trCfg.BindPort = port
+		c.serfCfg.MemberlistConfig.AdvertiseAddr = addr
+		c.serfCfg.MemberlistConfig.AdvertisePort = port
 		return nil
 	}
 }
 
 // WithAdvertise specifies which UDP interface we must advertise to
 // other nodes. It defaults to Bind* values.
-func withAdvertise(addr string, port int) Option {
+func WithAdvertise(addr string, port int) Option {
 	return func(c *config) error {
-		// TODO(rasyld): this is not implemented in our transport yet.
 		c.serfCfg.MemberlistConfig.AdvertiseAddr = addr
 		c.serfCfg.MemberlistConfig.AdvertisePort = port
 		return nil

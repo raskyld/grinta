@@ -32,10 +32,6 @@ func TestRadix(t *testing.T) {
 		t.Fatalf("bad length: %v %v", r.Len(), len(inp))
 	}
 
-	for k := range r.Walk() {
-		println(k)
-	}
-
 	for k, v := range inp {
 		out, ok := r.Get(k)
 		if !ok {

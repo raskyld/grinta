@@ -7,83 +7,69 @@
   </p>
 </div>
 
-* *Goroutinettes* :heart: are simple goroutines which are assigned a *name*
-and are exposed on a *fabric* :link: 
+* *Goroutines* hold an *Endpoint* :round_pushpin: on which they can listen
+  for inbound *Flow* establishment requests :ocean:
+* *Flows* :ocean: are bidirectional communication chanel between
+  a *client* and an *Endpoint* :round_pushpin:
+* *Endpoints* :round_pushpin: are *named* listeners exposed on a *fabric* :link: 
 * *Fabrics* :link: are meshes of Golang processes &mdash; potentially
-distributed over multiple machines &mdash; facilitating
-*flow* :ocean: establishment.
-* *Flows* :ocean: are bidirectional communication channels between
-  a *client* and a *Goroutinette* :heart:
+  distributed over multiple machines &mdash; capable of establishing
+  *flow* :ocean:
 
-## How it works
+## Why?
 
-The first thing to do is to initiate a `Fabric` :link:,
-and makes it `Fabric.Join` an existing mesh. Under the hood,
-it will use a UDP gossip protocol to discover
-members of the Fabric :link: and exchange *Goroutinettes*' :heart: name.
-Our host should converge quickly and discover which
-*Goroutinettes* :heart: (and `Host`s) are available in the `Fabric` :link:.
+Golang Runtime's concurrency model has two major actors:
+* Computational units: *Goroutines*.
+* Communication primitives: *Channels*. 
 
-Then, for the actual data-plane, `Host`s are *lazily* peered together using
-[*Connect RPC*][better-grpc]'s HTTP/2 bi-di multiplexed streams.
+They have one obvious limitation: they can only be used **inside of the same
+process**.
 
-*Goroutinettes* :heart: can then be exposed on the
-`Fabric` :link: and start accepting `Flow`s :ocean:.
-Those are allocated on demand by *clients* and
-are implemented on-top of:
+Your software may scale to the point it cannot run in a single
+process anymore, you now have *Goroutines* spread in different
+processes (and likely, machines). Maybe they used *Channels* to communicate together asynchronously,
+but now, they can't anymore and you must rewrite parts of your code.
 
-* Go channels if the destination *Goroutinette* :heart: is in
-  the same `Host`. (Value is still *copied*.)
-* Inter-`Host` streams, encapsulated in a custom protobuf-encoded structure.
+`grinta` aims to generalise those actors, so they can be ported to a
+*distributed* environment with **zero rewriting**.
 
-And *voilà*, your goroutines can communicate even if they are not in
-the same process &mdash; or even, on the same machine! :nerd:
+Simply put, if a *Goroutine* hold an *Endpoint* :round_pushpin:, it can
+accept *Flow* :ocean: requests from others, regardless of whether
+they live in the same process or not.
 
-## Design Principles
+If both *Goroutines* are in the same process, the *Flow* is **really just
+two Channel** (one for each direction). If they live in different process,
+then, the *Fabric* :link: kicks in and allocates
+a **QUIC Bidirectional Stream**, preferably using an already active
+**QUIC connection** to let the two *Goroutines* communicate.
 
-The `goroutinettes` framework is:
+This has one important implication though: you cannot share memory over
+a *Flow*, even if both *goroutines* live in the same process. Otherwise,
+you would have to write specific code depending on where is the *Endpoint*
+:round_pushpin: you are trying to *Dial*, which is exactly what `grinta` want
+to avoid to guarantee its **zero rewrite portability** promise.
 
-* Anti-Fragile :shield:
-* Scalable :rocket: 
-* Minimalist :seedling:
+## Features
 
-### Anti-Fragile :shield:
+* **Simple API**: `Fabric` -> `Endpoint` -> `Flow` describes an intuitive
+  hierarchy and their APIs are kept minimal.
+* **Golang Focused**: By focusing on a single language, we remove a lot of
+  complexity and can optimise for just our specific use-case.
+* **No Central Authority**: A `grinta` cluster has no central authority, no
+  strongly consistent consensus protocol, nodes collaborate together to
+  converge as fast as possible.
+* **GRINTA Protocol**: A custom protocol made on top of:
+  * a first *QUIC Transport Layer* supporting multiplexed inter-node
+    bidirectional **streams** and lightweight **datagrams**, 
+  * an implementation of the ["SWIM"][swim] gossip protocol:
+    [`hashicorp/memberlist`][dep-mbl],
+  * an adapter to run `memberlist` clusters on top of our
+    *QUIC Transport Layer*,
+  * a set of versioned [Protobuf Messages](./proto/grinta) which describes
+    our control plane communication format,
+  * an event and query bus to propagate *Endpoint* :round_pushpin: information:
+    [`hashicorp/serf`][dep-serf];
 
-I avoided using a strongly consistent protocol since the `Fabric`
-should be **anti-fragile**, and capable of running on top of a sh.. low-quality
-network. APIs MUST NOT model an *infallible* `Fabric`:
-this doesn't exist. Hence, users MUST be ready to handle
-network errors, so they can build an anti-fragile, fault-tolerant distributed
-system on top of `goroutinettes`.
-
-### Scalable :rocket:
-
-Furthermore, not having a heavy consensus protocol allows us to
-**scale** horizontally aggressively. It SHOULD be pretty easy to build
-a *gateway* to inter-connect two independant `Fabric`s. At scale, this
-will likely be needed to avoid having full-meshing. This SHOULD allows really
-flexible topologies.
-
-### Minimalist :seedling:
-
-Finally, I don't want `goroutinettes` to become bloated.
-It should be a fundational network library **focused** on the Golang runtime
-capabilities. Namely, goroutines are really central to the library: the runtime
-is multiplexing I/O nicely and provides a sufficiently competent `net` package.
-
-Dependencies SHOULD be *kept* minimal, actually, I can enumerate them:
-
-* [`hashicorp/memberlist`][dep-mbl], for the UDP Gossip protocol of the `Fabric`s.
-* [`go-logr/logr`][dep-gll], to let you chose how to treat *structured logs*.
-* [`bufbuild/connect-go`][dep-con], used for `Fabric`'s `Host`s peering.
-
-The choice of *Connect* over *gRPC* is a direct consequence of this principle.
-gRPC has a maximalist design which is not compatible with my vision. If you want
-to understand it better, I invite you to read [this article][better-grpc] which
-will do a better job than me explaining why. Anyway, this choice mades me
-divide by two our number of dependencies.
-
+[swim]: (http://ieeexplore.ieee.org/document/1028914/)
 [dep-mbl]: https://pkg.go.dev/github.com/hashicorp/memberlist
-[dep-gll]: https://pkg.go.dev/github.com/go-logr/logr
-[dep-con]: https://pkg.go.dev/github.com/bufbuild/connect-go
-[better-grpc]: https://buf.build/blog/connect-a-better-grpc
+[dep-serf]: https://pkg.go.dev/github.com/hashicorp/serf

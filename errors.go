@@ -23,10 +23,8 @@ var (
 	ErrHostNotFound           = errors.New("fabric: host not found")
 	ErrDialFailed             = errors.New("fabric: failed to dial remote endpoint")
 
-	ErrBufferSize             = errors.New("transport: could not allocate udp buffer")
 	ErrInvalidAddr            = errors.New("transport: the IP you provided is invalid")
 	ErrUdpNotAvailable        = errors.New("transport: UDP listener not available")
-	ErrTransportShutdown      = errors.New("transport: transport was closed")
 	ErrTransportNotAdvertised = errors.New("transport: transport was not advertised yet")
 	ErrStreamWrite            = errors.New("transport: error writing to a stream")
 	ErrProtocolViolation      = errors.New("transport: protocol violation")
@@ -35,27 +33,23 @@ var (
 )
 
 const (
-	QErrStreamProtocolViolation     = quic.StreamErrorCode(0xF)
+	// QErrStreamProtocolViolation is sent when the protocol
+	// initialisation encounters unexpected packets.
+	QErrStreamProtocolViolation = quic.StreamErrorCode(0xF)
+
+	// QErrStreamEndpointDoesNotExists is sent by nodes when an
+	// established flow request an endpoint which is no longer
+	// available.
 	QErrStreamEndpointDoesNotExists = quic.StreamErrorCode(0x4)
-	QErrStreamClosed                = quic.StreamErrorCode(0xC)
+
+	// QErrStreamClosed is sent when a stream is shutting down.
+	QErrStreamClosed = quic.StreamErrorCode(0xC)
 )
 
 var (
-	QErrInternal = QuicApplicationError{
-		Code:   0x1,
-		Prefix: "internal",
-	}
-	QErrHostname = QuicApplicationError{
-		Code:   0x2,
-		Prefix: "hostname",
-	}
 	QErrShutdown = QuicApplicationError{
 		Code:   0x3,
 		Prefix: "shutdown",
-	}
-	QErrNameConflict = QuicApplicationError{
-		Code:   0x4,
-		Prefix: "name conflict",
 	}
 )
 

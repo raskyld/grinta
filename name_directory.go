@@ -1,7 +1,9 @@
 package grinta
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -99,6 +101,47 @@ func (dir *nameDirectory) resolve(name string) (string, *grintav1alpha1.NameClai
 	return "", nil, ErrNameResolution
 }
 
+func (dir *nameDirectory) resolveWithCluster(ctx context.Context, name string) (string, *grintav1alpha1.NameClaim, error) {
+	owner, _, err := dir.resolve(name)
+	if err != nil && errors.Is(ErrNameResolution, err) {
+		dir.logger.Debug("record not found, trying to query the cluster", LabelEndpointName.L(name))
+		q, err := dir.fb.ResolveEndpoint(ctx, ResolveEndpointRequest{
+			EndpointName: name,
+			// no need consensus, first claimant, first winner.
+			NoConsensus: true,
+		})
+		if err != nil {
+			return "", nil, fmt.Errorf("%w and cannot query cluster: %w", ErrNameResolution, err)
+		}
+		var resp *ResolveEndpointResponse
+		select {
+		case resp = <-q.ResponseCh():
+		case <-ctx.Done():
+			return "", nil, ctx.Err()
+		}
+		if resp == nil {
+			return "", nil, ErrNameResolution
+		}
+		if resp.Error != nil {
+			return "", nil, resp.Error
+		}
+		if resp.Host == "" {
+			return "", resp.claim, ErrNameResolution
+		}
+		dir.logger.Debug(
+			"record found in cluster",
+			LabelPeerName.L(resp.Host),
+			LabelEndpointName.L(name),
+		)
+		if resp.claim != nil {
+			dir.record(resp.claim, false)
+		}
+
+		return resp.Host, resp.claim, nil
+	}
+	return owner, nil, err
+}
+
 func (dir *nameDirectory) scan(prefix string) (found []string, err error) {
 	dir.lk.RLock()
 	defer dir.lk.RUnlock()
@@ -159,6 +202,7 @@ func (dir *nameDirectory) record(claim *grintav1alpha1.NameClaim, synchronous bo
 			if currentNode.owner == claim.GetNodeName() {
 				currentNode.owner = ""
 			}
+			dir.logger.Debug("freed name", LabelEndpointName.L(claim.GetEndpointName()))
 			return nil
 		}
 
@@ -166,6 +210,11 @@ func (dir *nameDirectory) record(claim *grintav1alpha1.NameClaim, synchronous bo
 		// our local state can be reconciled.
 		if len(currentNode.owner) == 0 {
 			currentNode.owner = claim.GetNodeName()
+			dir.logger.Debug(
+				"claimed name",
+				LabelEndpointName.L(claim.GetEndpointName()),
+				LabelPeerName.L(claim.GetNodeName()),
+			)
 		}
 
 		// Idempotency rule: You MAY claim a name you already own.
@@ -211,6 +260,11 @@ func (dir *nameDirectory) record(claim *grintav1alpha1.NameClaim, synchronous bo
 
 		if claim.GetMode() == grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_CLAIM {
 			record.owner = claimant
+			dir.logger.Debug(
+				"claimed name",
+				LabelEndpointName.L(claim.GetEndpointName()),
+				LabelPeerName.L(claim.GetNodeName()),
+			)
 		}
 
 		dir.d.Insert(name, record)
@@ -313,7 +367,7 @@ func (dir *nameDirectory) handleConflicts() {
 							"cannot fix an endpoint conflict alone, initiating a cluster vote",
 							"endpoint_name", epName,
 						)
-						rq, err := dir.fb.ResolveEndpoint(ResolveEndpointRequest{
+						rq, err := dir.fb.ResolveEndpoint(context.Background(), ResolveEndpointRequest{
 							EndpointName: epName,
 						})
 						if err != nil {

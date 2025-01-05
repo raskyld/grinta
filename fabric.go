@@ -375,7 +375,7 @@ func (fb *Fabric) DialEndpoint(ctx context.Context, name string) (Flow, error) {
 		return nil, ErrFabricClosed
 	}
 
-	owner, _, err := fb.dir.resolve(name)
+	owner, _, err := fb.dir.resolveWithCluster(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -416,7 +416,7 @@ func (fb *Fabric) DialEndpoint(ctx context.Context, name string) (Flow, error) {
 	return newRemoteChan(stream), nil
 }
 
-func (fb *Fabric) ResolveEndpoint(req ResolveEndpointRequest) (*ResolveEndpointQuery, error) {
+func (fb *Fabric) ResolveEndpoint(ctx context.Context, req ResolveEndpointRequest) (*ResolveEndpointQuery, error) {
 	if !ValidateEndpointName(req.EndpointName) {
 		return nil, ErrNameInvalid
 	}
@@ -436,9 +436,16 @@ func (fb *Fabric) ResolveEndpoint(req ResolveEndpointRequest) (*ResolveEndpointQ
 		return nil, fmt.Errorf("%w: %w", ErrQueryInvalid, err)
 	}
 
+	// best-effort aligning the timeout of the query
+	timeout := 30 * time.Second
+	dl, hasDl := ctx.Deadline()
+	if hasDl {
+		timeout = time.Until(dl)
+	}
+
 	res, err := fb.serf.Query("resolve_endpoint", payload, &serf.QueryParam{
 		FilterNodes: req.NodeNames,
-		Timeout:     req.Timeout,
+		Timeout:     timeout,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrQueryInvalid, err)
@@ -458,8 +465,8 @@ func (fb *Fabric) ResolveEndpoint(req ResolveEndpointRequest) (*ResolveEndpointQ
 
 	go func() {
 		for {
-			nodeResp, closed := <-res.ResponseCh()
-			if closed {
+			nodeResp, ok := <-res.ResponseCh()
+			if !ok {
 				break
 			}
 			voter := nodeResp.From
@@ -468,6 +475,28 @@ func (fb *Fabric) ResolveEndpoint(req ResolveEndpointRequest) (*ResolveEndpointQ
 			if err != nil {
 				fb.logger.Warn("invalid message during query", LabelError.L(err))
 				continue
+			}
+
+			if req.NoConsensus && vote.HasClaim() {
+				claim := vote.GetClaim()
+				if claim.GetMode() == grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_CLAIM {
+					rq.lk.Lock()
+					if rq.closed {
+						rq.lk.Unlock()
+						return
+					}
+					rq.responseCh <- &ResolveEndpointResponse{
+						claim:         claim,
+						Error:         nil,
+						Host:          claim.GetNodeName(),
+						ExpectedVotes: expected,
+						Participation: float64(len(rq.votes)) / float64(rq.expected),
+					}
+					rq.closed = true
+					close(rq.responseCh)
+					res.Close()
+					rq.lk.Unlock()
+				}
 			}
 
 			rq.votes[voter] = vote
@@ -481,6 +510,20 @@ func (fb *Fabric) ResolveEndpoint(req ResolveEndpointRequest) (*ResolveEndpointQ
 		response := &ResolveEndpointResponse{
 			ExpectedVotes: rq.expected,
 			Participation: participation,
+		}
+
+		if req.NoConsensus {
+			response.Error = ErrNameResolution
+			rq.lk.Lock()
+			if rq.closed {
+				rq.lk.Unlock()
+				return
+			}
+			rq.responseCh <- response
+			rq.closed = true
+			close(rq.responseCh)
+			rq.lk.Unlock()
+			return
 		}
 
 		requiredParticipation := req.RequiredParticipation
@@ -578,7 +621,7 @@ func (fb *Fabric) ResolveEndpoint(req ResolveEndpointRequest) (*ResolveEndpointQ
 type FabricControlPlane interface {
 	// ResolveEndpoint will asynchronously start a consensus-based
 	// resolution of an `Endpoint`'s host.
-	ResolveEndpoint(req ResolveEndpointRequest) (*ResolveEndpointQuery, error)
+	ResolveEndpoint(ctx context.Context, req ResolveEndpointRequest) (*ResolveEndpointQuery, error)
 }
 
 type ResolveEndpointRequest struct {
@@ -588,8 +631,8 @@ type ResolveEndpointRequest struct {
 	// NodeNames allows you, when set, to limit the query to specific nodes.
 	NodeNames []string
 
-	// Timeout for the request to finish
-	Timeout time.Duration
+	// NoConsensus if we want the first claimant to win.
+	NoConsensus bool
 
 	// RequiredParticipation invalidate the query if not enough nodes answer.
 	// Default to 0.67.

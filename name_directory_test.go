@@ -1,6 +1,7 @@
 package grinta
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"slices"
@@ -16,14 +17,16 @@ type MockFabricControlPlane struct {
 	m *mock.Mock
 }
 
-func (m *MockFabricControlPlane) ResolveEndpoint(req ResolveEndpointRequest) (*ResolveEndpointQuery, error) {
-	args := m.m.Called(req)
+func (m *MockFabricControlPlane) ResolveEndpoint(ctx context.Context, req ResolveEndpointRequest) (*ResolveEndpointQuery, error) {
+	args := m.m.Called(ctx, req)
 	return args.Get(0).(*ResolveEndpointQuery), args.Error(1)
 }
 
 func TestNameDirectory_SynchronousRev(t *testing.T) {
-	g1 := MockFabricControlPlane{}
-	t1 := newNameDir(slog.Default(), &g1, "t1")
+	g1 := &MockFabricControlPlane{
+		m: &mock.Mock{},
+	}
+	t1 := newNameDir(slog.Default(), g1, "t1")
 
 	ep1 := &grintav1alpha1.NameClaim{}
 	ep1.SetEndpointName("ep1")
@@ -46,9 +49,11 @@ func TestNameDirectory_SynchronousRev(t *testing.T) {
 	t1.close()
 }
 
-func TestNameDirectory_Resolution(t *testing.T) {
-	g1 := MockFabricControlPlane{}
-	t1 := newNameDir(slog.Default(), &g1, "t1")
+func TestNameDirectory_resolve(t *testing.T) {
+	g1 := &MockFabricControlPlane{
+		m: &mock.Mock{},
+	}
+	t1 := newNameDir(slog.Default(), g1, "t1")
 
 	ep1 := &grintav1alpha1.NameClaim{}
 	ep1.SetEndpointName("ep1")
@@ -84,9 +89,58 @@ func TestNameDirectory_Resolution(t *testing.T) {
 	t1.close()
 }
 
+func TestNameDirectory_resolveWithCluster(t *testing.T) {
+	g1 := &MockFabricControlPlane{
+		m: &mock.Mock{},
+	}
+	t1 := newNameDir(slog.Default(), g1, "t1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ep1 := &grintav1alpha1.NameClaim{}
+	ep1.SetEndpointName("ep1")
+	ep1.SetNodeName("t2")
+	ep1.SetMode(grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_CLAIM)
+
+	req := ResolveEndpointRequest{
+		EndpointName: "ep1",
+		NoConsensus:  true,
+	}
+
+	responseCh := make(chan *ResolveEndpointResponse, 1)
+	q := &ResolveEndpointQuery{
+		responseCh: responseCh,
+	}
+
+	res := &ResolveEndpointResponse{
+		Error:         nil,
+		Host:          ep1.GetNodeName(),
+		claim:         ep1,
+		ExpectedVotes: 3,
+		Participation: 1.0,
+	}
+
+	g1.m.On("ResolveEndpoint", ctx, req).Return(q, nil)
+
+	q.lk.Lock()
+	responseCh <- res
+	q.closed = true
+	close(responseCh)
+	q.lk.Unlock()
+
+	owner, _, err := t1.resolveWithCluster(ctx, "ep1")
+	require.NoError(t, err)
+	require.Equal(t, ep1.GetNodeName(), owner)
+
+	t1.close()
+}
+
 func TestNameDirectory_ScanPrefix(t *testing.T) {
-	g1 := MockFabricControlPlane{}
-	t1 := newNameDir(slog.Default(), &g1, "t1")
+	g1 := &MockFabricControlPlane{
+		m: &mock.Mock{},
+	}
+	t1 := newNameDir(slog.Default(), g1, "t1")
 
 	ep1 := &grintav1alpha1.NameClaim{}
 	ep1.SetEndpointName("ep1")
@@ -119,8 +173,10 @@ func TestNameDirectory_ScanPrefix(t *testing.T) {
 }
 
 func TestNameDirectory_ConflictAvoided(t *testing.T) {
-	g1 := MockFabricControlPlane{}
-	t1 := newNameDir(slog.Default(), &g1, "t1")
+	g1 := &MockFabricControlPlane{
+		m: &mock.Mock{},
+	}
+	t1 := newNameDir(slog.Default(), g1, "t1")
 
 	ep1 := &grintav1alpha1.NameClaim{}
 	ep1.SetEndpointName("ep1")
@@ -140,8 +196,10 @@ func TestNameDirectory_ConflictAvoided(t *testing.T) {
 }
 
 func TestNameDirectory_ConflictDetected(t *testing.T) {
-	g1 := MockFabricControlPlane{}
-	t1 := newTestableNameDir(slog.Default(), &g1, "t1")
+	g1 := &MockFabricControlPlane{
+		m: &mock.Mock{},
+	}
+	t1 := newTestableNameDir(slog.Default(), g1, "t1")
 
 	ep1 := &grintav1alpha1.NameClaim{}
 	ep1.SetEndpointName("ep1")
@@ -168,8 +226,10 @@ func TestNameDirectory_ConflictSolved(t *testing.T) {
 		AddSource: true,
 	}))
 
-	g1 := MockFabricControlPlane{}
-	t1 := newTestableNameDir(logger, &g1, "t1")
+	g1 := &MockFabricControlPlane{
+		m: &mock.Mock{},
+	}
+	t1 := newTestableNameDir(logger, g1, "t1")
 
 	ep1 := &grintav1alpha1.NameClaim{}
 	ep1.SetEndpointName("ep1")
@@ -240,7 +300,7 @@ func TestNameDirectory_ConflictTimeout_AskConsensus(t *testing.T) {
 		Participation: 1.0,
 	}
 
-	g1.m.On("ResolveEndpoint", req).Return(q, nil)
+	g1.m.On("ResolveEndpoint", context.Background(), req).Return(q, nil)
 
 	require.NoError(t, t1.record(ep1, true))
 	require.Nil(t, t1.getNamesWithConflict(), "no conflict yet")

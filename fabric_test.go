@@ -143,6 +143,15 @@ func TestFabric(t *testing.T) {
 		require.Equal(t, "hello!", string(castedVal))
 	})
 
+	t.Run("node2 can dial endpoint srv1 which is remote", func(t *testing.T) {
+		prod, err := fbNode2.DialEndpoint(context.Background(), "srv1")
+		require.NoError(t, err)
+		prod.Write(context.Background(), TestString("hello2!"))
+		val := <-values
+		castedVal := val.([]byte)
+		require.Equal(t, "hello2!", string(castedVal))
+	})
+
 	fbNode1.Shutdown()
 	fbNode2.Shutdown()
 }

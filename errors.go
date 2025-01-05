@@ -15,7 +15,6 @@ var (
 	ErrNameInvalid            = errors.New("fabric: names must only contains alphanum, dashes, dots and be less than 128 chars")
 	ErrInvalidCfg             = errors.New("fabric: invalid options")
 	ErrQueryInvalid           = errors.New("fabric: query is invalid")
-	ErrQueryClosed            = errors.New("fabric: query was closed by user")
 	ErrJoinCluster            = errors.New("fabric: could not join cluster")
 	ErrFabricInvalidFrame     = errors.New("fabric: invalid gossip frame")
 	ErrNameConflict           = errors.New("fabric: endpoint name conflict")

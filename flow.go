@@ -4,14 +4,20 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
+	"net"
+	"reflect"
 	"sync"
 	"time"
 
+	"github.com/quic-go/quic-go"
+	grintav1alpha1 "github.com/raskyld/grinta/gen/grinta/v1alpha1"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
-// Flow is the equivalent of Go built-in chan, with the following
+// RawFlow is the equivalent of Go built-in chan, with the following
 // distinctions:
 //
 // * `Recv` MUST NOT be called concurrently.
@@ -22,22 +28,22 @@ import (
 //   - If both end are in the same process, it falls back to native channel;
 //   - If they are in different processes, the messages are `Marshal()`-ed
 //     over the `Fabric`.
-type Flow interface {
-	FlowReader
-	FlowWriter
+type RawFlow interface {
+	RawFlowReader
+	RawFlowWriter
 	io.Closer
 }
 
-var _ Flow = (*LocalFlow)(nil)
-var _ Flow = (*RemoteFlow)(nil)
+var _ RawFlow = (*localFlow)(nil)
+var _ RawFlow = (*remoteFlow)(nil)
 
-type FlowReader interface {
-	Read(ctx context.Context) (interface{}, error)
+type RawFlowReader interface {
+	ReadRaw(ctx context.Context) (interface{}, error)
 	CloseRead()
 }
 
-type FlowWriter interface {
-	Write(ctx context.Context, item Marshaler) error
+type RawFlowWriter interface {
+	WriteRaw(ctx context.Context, item Marshaler) error
 	CloseWrite()
 }
 
@@ -45,28 +51,99 @@ type Marshaler interface {
 	Marshal() ([]byte, error)
 }
 
-type LocalFlow struct {
+type Unmarshaler interface {
+	Unmarshal(buf []byte) error
+}
+
+type Clonable interface {
+	Clone() interface{}
+}
+
+type Flow[W Marshaler, R Unmarshaler] struct {
+	inner RawFlow
+	FlowWriter[W]
+	FlowReader[R]
+}
+
+func NewFlow[W Marshaler, R Unmarshaler](raw RawFlow) Flow[W, R] {
+	return Flow[W, R]{
+		inner:      raw,
+		FlowWriter: FlowWriter[W]{RawFlowWriter: raw},
+		FlowReader: FlowReader[R]{RawFlowReader: raw},
+	}
+}
+
+func (fl Flow[W, R]) Close() error {
+	return fl.inner.Close()
+}
+
+type FlowWriter[W Marshaler] struct {
+	RawFlowWriter
+}
+
+func (fl FlowWriter[W]) Write(ctx context.Context, item W) error {
+	return fl.RawFlowWriter.WriteRaw(ctx, item)
+}
+
+func (fl FlowWriter[W]) WriteRaw(ctx context.Context, item Marshaler) error {
+	toWrite, ok := item.(W)
+	if !ok {
+		return ErrFlowTypeMismatch
+	}
+	return fl.RawFlowWriter.WriteRaw(ctx, toWrite)
+}
+
+type FlowReader[R Unmarshaler] struct {
+	RawFlowReader
+}
+
+func (fl FlowReader[R]) Read(ctx context.Context) (result R, resultErr error) {
+	read, err := fl.RawFlowReader.ReadRaw(ctx)
+	if err != nil {
+		resultErr = err
+		return
+	}
+	var ok bool
+	result, ok = read.(R)
+	if ok {
+		return
+	}
+	var buf []byte
+	buf, ok = read.([]byte)
+	if !ok {
+		resultErr = fmt.Errorf(
+			"%w: read value is neither %s nor []byte",
+			ErrFlowTypeMismatch,
+			reflect.TypeFor[R]().Name(),
+		)
+		return
+	}
+	resultErr = result.Unmarshal(buf)
+	return
+}
+
+type localFlow struct {
 	w          chan<- interface{}
 	r          <-chan interface{}
 	wCloseCh   chan struct{}
 	wCloseOnce sync.Once
 }
 
-func newLocalChan() (client *LocalFlow, server *LocalFlow) {
+func newLocalChan() (client *localFlow, server *localFlow) {
 	outbound := make(chan interface{})
 	inbound := make(chan interface{})
-	client = &LocalFlow{
+	client = &localFlow{
 		w: outbound,
 		r: inbound,
 	}
-	server = &LocalFlow{
+	server = &localFlow{
 		w: inbound,
 		r: outbound,
 	}
 	return
 }
 
-func (lc *LocalFlow) Read(ctx context.Context) (interface{}, error) {
+func (lc *localFlow) ReadRaw(ctx context.Context) (interface{}, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -78,58 +155,97 @@ func (lc *LocalFlow) Read(ctx context.Context) (interface{}, error) {
 	}
 }
 
-func (lc *LocalFlow) CloseRead() {}
+func (lc *localFlow) CloseRead() {}
 
-func (lc *LocalFlow) Write(ctx context.Context, item Marshaler) error {
+func (lc *localFlow) WriteRaw(ctx context.Context, item Marshaler) error {
+	var toWrite interface{}
+	clonable, ok := item.(Clonable)
+	if ok {
+		toWrite = clonable
+	} else {
+		buf, err := item.Marshal()
+		if err != nil {
+			return err
+		}
+		toWrite = buf
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-lc.wCloseCh:
 		return ErrFlowClosed
-	case lc.w <- item:
+	case lc.w <- toWrite:
 		return nil
 	}
 }
 
-func (lc *LocalFlow) CloseWrite() {
+func (lc *localFlow) CloseWrite() {
 	lc.wCloseOnce.Do(func() {
 		close(lc.wCloseCh)
 	})
 }
 
-func (lc *LocalFlow) Close() error {
+func (lc *localFlow) Close() error {
 	lc.CloseWrite()
 	return nil
 }
 
-type RemoteFlow struct {
-	stream *streamWrapper
-	buf    *bufio.Reader
+type remoteFlow struct {
+	mode        grintav1alpha1.StreamMode
+	localAddr   net.Addr
+	remoteAddr  net.Addr
+	destination string
+	buf         *bufio.Reader
+
+	quic.Stream
 }
 
-func newRemoteChan(stream *streamWrapper) *RemoteFlow {
-	return &RemoteFlow{
-		stream: stream,
-		buf:    bufio.NewReader(stream),
+func newRemoteFlow(
+	stream quic.Stream,
+	localAddr, remoteAddr net.Addr,
+	mode grintav1alpha1.StreamMode,
+	dest string,
+) *remoteFlow {
+	return &remoteFlow{
+		mode:        mode,
+		localAddr:   localAddr,
+		remoteAddr:  remoteAddr,
+		destination: dest,
+		Stream:      stream,
+		buf:         bufio.NewReader(stream),
 	}
 }
 
-func (rc *RemoteFlow) Read(ctx context.Context) (interface{}, error) {
+func (rc *remoteFlow) LocalAddr() net.Addr {
+	return rc.localAddr
+}
+
+func (rc *remoteFlow) RemoteAddr() net.Addr {
+	return rc.remoteAddr
+}
+
+func (rc *remoteFlow) ReadRaw(ctx context.Context) (interface{}, error) {
 	dl, hasDl := ctx.Deadline()
 	if hasDl {
-		rc.stream.SetReadDeadline(dl)
-		defer func() { rc.stream.SetReadDeadline(time.Time{}) }()
+		rc.SetReadDeadline(dl)
+		defer func() { rc.SetReadDeadline(time.Time{}) }()
 	}
 
 	var nextSize uint64
 	var byteRead int
 	for byteRead == 0 {
-		buf, _ := rc.buf.Peek(binary.MaxVarintLen64)
-		if serr := rc.stream.Context().Err(); serr != nil {
+		buf, err := rc.buf.Peek(binary.MaxVarintLen64)
+		if serr := rc.Context().Err(); serr != nil {
 			return nil, serr
 		}
 		if serr := ctx.Err(); serr != nil {
 			return nil, serr
+		}
+		if err != nil {
+			var streamErr *quic.StreamError
+			if errors.As(err, &streamErr) {
+				return nil, err
+			}
 		}
 		for i, b := range buf {
 			if b < 0x80 {
@@ -141,13 +257,18 @@ func (rc *RemoteFlow) Read(ctx context.Context) (interface{}, error) {
 	var buf []byte
 	for buf == nil {
 		peeked, err := rc.buf.Peek(byteRead + int(nextSize))
-		if serr := rc.stream.Context().Err(); serr != nil {
+		if serr := rc.Context().Err(); serr != nil {
 			return nil, serr
 		}
 		if serr := ctx.Err(); serr != nil {
 			return nil, serr
 		}
-		if err == nil {
+		if err != nil {
+			var streamErr *quic.StreamError
+			if errors.As(err, &streamErr) {
+				return nil, err
+			}
+		} else {
 			buf = make([]byte, nextSize)
 			copy(buf, peeked[byteRead:])
 		}
@@ -157,11 +278,11 @@ func (rc *RemoteFlow) Read(ctx context.Context) (interface{}, error) {
 	return buf, nil
 }
 
-func (rc *RemoteFlow) CloseRead() {
-	rc.stream.CancelRead(QErrStreamClosed)
+func (rc *remoteFlow) CloseRead() {
+	rc.CancelRead(QErrStreamClosed)
 }
 
-func (rc *RemoteFlow) Write(ctx context.Context, item Marshaler) error {
+func (rc *remoteFlow) WriteRaw(ctx context.Context, item Marshaler) error {
 	itemBuf, err := item.Marshal()
 	if err != nil {
 		return err
@@ -172,18 +293,18 @@ func (rc *RemoteFlow) Write(ctx context.Context, item Marshaler) error {
 	copy(buf[len(varintBuf):], itemBuf)
 	dl, ok := ctx.Deadline()
 	if ok {
-		rc.stream.SetWriteDeadline(dl)
-		defer func() { rc.stream.SetReadDeadline(time.Time{}) }()
+		rc.SetWriteDeadline(dl)
+		defer func() { rc.SetReadDeadline(time.Time{}) }()
 	}
-	_, err = rc.stream.Write(buf)
+	_, err = rc.Write(buf)
 	return err
 }
 
-func (rc *RemoteFlow) CloseWrite() {
-	rc.stream.Close()
+func (rc *remoteFlow) CloseWrite() {
+	rc.Stream.Close()
 }
 
-func (rc *RemoteFlow) Close() error {
+func (rc *remoteFlow) Close() error {
 	rc.CloseWrite()
 	rc.CloseRead()
 	return nil

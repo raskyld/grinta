@@ -19,6 +19,10 @@ func (ts TestString) Marshal() ([]byte, error) {
 	return []byte(ts), nil
 }
 
+func (ts TestString) Clone() interface{} {
+	return ts
+}
+
 func TestFabric(t *testing.T) {
 	n1handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level:     slog.LevelDebug,
@@ -122,7 +126,7 @@ func TestFabric(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				for {
-					val, err := rcv.Read(context.Background())
+					val, err := rcv.ReadRaw(context.Background())
 					if err != nil {
 						break
 					}
@@ -137,7 +141,7 @@ func TestFabric(t *testing.T) {
 	t.Run("node1 can dial endpoint srv1 which is local", func(t *testing.T) {
 		prod, err := fbNode1.DialEndpoint(context.Background(), "srv1")
 		require.NoError(t, err)
-		prod.Write(context.Background(), TestString("hello!"))
+		prod.WriteRaw(context.Background(), TestString("hello!"))
 		val := <-values
 		castedVal := val.(TestString)
 		require.Equal(t, "hello!", string(castedVal))
@@ -146,7 +150,7 @@ func TestFabric(t *testing.T) {
 	t.Run("node2 can dial endpoint srv1 which is remote", func(t *testing.T) {
 		prod, err := fbNode2.DialEndpoint(context.Background(), "srv1")
 		require.NoError(t, err)
-		prod.Write(context.Background(), TestString("hello2!"))
+		prod.WriteRaw(context.Background(), TestString("hello2!"))
 		val := <-values
 		castedVal := val.([]byte)
 		require.Equal(t, "hello2!", string(castedVal))

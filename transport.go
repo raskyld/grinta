@@ -65,7 +65,7 @@ type Transport struct {
 	wg sync.WaitGroup
 
 	// GRINTA protocol
-	chanCh   chan *streamWrapper
+	flowCh   chan *remoteFlow
 	hostsCxs map[string][]hostCx
 
 	// Memberlist Protocol
@@ -97,7 +97,7 @@ func NewTransport(cfg *TransportConfig) (trans *Transport, err error) {
 
 	t := &Transport{
 		cfg:      cfg,
-		chanCh:   make(chan *streamWrapper),
+		flowCh:   make(chan *remoteFlow),
 		hostsCxs: make(map[string][]hostCx),
 		packetCh: make(chan *memberlist.Packet),
 		streamCh: make(chan net.Conn),
@@ -328,7 +328,7 @@ func (t *Transport) DialAddressTimeout(addr memberlist.Address, timeout time.Dur
 	return t.initialiseOutboundStream(ctx, stream, hcx, initFrame)
 }
 
-func (t *Transport) dialFlow(ctx context.Context, addr string, dest string) (*streamWrapper, error) {
+func (t *Transport) dialFlow(ctx context.Context, addr string, dest string) (*remoteFlow, error) {
 	hcx, err := t.getActiveCx(ctx, memberlist.Address{
 		Addr: addr,
 	})
@@ -511,7 +511,7 @@ func (t *Transport) handleStreams(hcx hostCx) {
 			case grintav1alpha1.StreamMode_STREAM_MODE_GOSSIP:
 				t.streamCh <- swrap
 			case grintav1alpha1.StreamMode_STREAM_MODE_FLOW:
-				t.chanCh <- swrap
+				t.flowCh <- swrap
 			}
 		}()
 	}
@@ -630,7 +630,7 @@ func (t *Transport) initialiseOutboundStream(
 	stream quic.Stream,
 	hcx hostCx,
 	initFrame *grintav1alpha1.InitFrame,
-) (*streamWrapper, error) {
+) (*remoteFlow, error) {
 	peerAddr := hcx.RemoteAddr().String()
 	logger := t.logger.With(
 		LabelStreamID.L(stream.StreamID()),
@@ -711,7 +711,7 @@ func (t *Transport) initialiseOutboundStream(
 		mLabels,
 	)
 
-	return newStreamWrapper(
+	return newRemoteFlow(
 		stream,
 		hcx.LocalAddr(),
 		hcx.RemoteAddr(),
@@ -724,7 +724,7 @@ func (t *Transport) initialiseInboundStream(
 	ctx context.Context,
 	stream quic.Stream,
 	hcx hostCx,
-) (*streamWrapper, error) {
+) (*remoteFlow, error) {
 	peerAddr := hcx.RemoteAddr().String()
 	logger := t.logger.With(
 		LabelStreamID.L(stream.StreamID()),
@@ -846,7 +846,7 @@ func (t *Transport) initialiseInboundStream(
 		return nil, ErrProtocolViolation
 	}
 
-	swrap := newStreamWrapper(
+	swrap := newRemoteFlow(
 		stream,
 		hcx.LocalAddr(),
 		hcx.RemoteAddr(),
@@ -871,46 +871,4 @@ func (p Perspective) String() string {
 		return "client"
 	}
 	panic("unreachable")
-}
-
-type streamWrapper struct {
-	mode        grintav1alpha1.StreamMode
-	localAddr   net.Addr
-	remoteAddr  net.Addr
-	destination string
-
-	// NB(raskyld): It is not clear from the go-quic docs and interface comments
-	// whether the stream is thread-safe, it states that Close MUST NOT
-	// be called concurrently with write, but looking at the implementation,
-	// it does use a mutex to sync Write/Close/Read operations, so I don't
-	// think we need to make it thread-safe ourselves.
-	// Furthermore, even though there is few (to none) reasons to call
-	// Write() and Read() concurrently, they have a 1-len channel to protect
-	// against concurrent uses.
-	quic.Stream
-}
-
-func newStreamWrapper(
-	stream quic.Stream,
-	localAddr, remoteAddr net.Addr,
-	mode grintav1alpha1.StreamMode,
-	dest string,
-) *streamWrapper {
-	st := &streamWrapper{
-		mode:        mode,
-		localAddr:   localAddr,
-		remoteAddr:  remoteAddr,
-		destination: dest,
-		Stream:      stream,
-	}
-
-	return st
-}
-
-func (stream *streamWrapper) LocalAddr() net.Addr {
-	return stream.localAddr
-}
-
-func (stream *streamWrapper) RemoteAddr() net.Addr {
-	return stream.remoteAddr
 }

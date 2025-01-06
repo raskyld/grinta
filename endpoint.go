@@ -10,7 +10,7 @@ import (
 // `Accept` inbound `Flow`.
 type Endpoint interface {
 	Name() string
-	Accept(context.Context) (Flow, error)
+	Accept(context.Context) (RawFlow, error)
 	io.Closer
 }
 
@@ -24,14 +24,14 @@ type endpoint struct {
 	lk      sync.Mutex
 
 	epGC   chan<- *endpoint
-	flowCh chan Flow
+	flowCh chan RawFlow
 }
 
 func newEndpoint(name string, gc chan<- *endpoint) *endpoint {
 	return &endpoint{
 		epGC:    gc,
 		name:    name,
-		flowCh:  make(chan Flow),
+		flowCh:  make(chan RawFlow),
 		closeCh: make(chan struct{}, 1),
 	}
 }
@@ -40,7 +40,7 @@ func (ep *endpoint) Name() string {
 	return ep.name
 }
 
-func (ep *endpoint) Accept(ctx context.Context) (Flow, error) {
+func (ep *endpoint) Accept(ctx context.Context) (RawFlow, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()

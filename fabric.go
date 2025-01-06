@@ -131,7 +131,7 @@ func Create(opts ...Option) (*Fabric, error) {
 	fb.wg.Add(3)
 	go fb.handleEvents()
 	go fb.handleEndpointGC()
-	go fb.handleChan()
+	go fb.handleFlow()
 
 	// Create our name dir.
 	fb.dir = newNameDir(fb.logger, fb, fb.localNodeName)
@@ -253,33 +253,33 @@ func (fb *Fabric) handleEvents() {
 	}
 }
 
-func (fb *Fabric) handleChan() {
+func (fb *Fabric) handleFlow() {
 	defer fb.wg.Done()
 	for {
 		// TODO(raskyld): add metrics
-		var stream *streamWrapper
+		var flow *remoteFlow
 		select {
-		case stream = <-fb.tr.chanCh:
+		case flow = <-fb.tr.flowCh:
 		case <-fb.shutdownCh:
 			fb.logger.Info("shutdown: stop accepting inbound flow establishments")
 			return
 		}
 		fb.lk.Lock()
-		ep, exists := fb.localEPs[stream.destination]
+		ep, exists := fb.localEPs[flow.destination]
 		fb.lk.Unlock()
 
 		if !exists {
-			stream.Stream.CancelRead(QErrStreamEndpointDoesNotExists)
-			stream.Stream.CancelWrite(QErrStreamEndpointDoesNotExists)
+			flow.Stream.CancelRead(QErrStreamEndpointDoesNotExists)
+			flow.Stream.CancelWrite(QErrStreamEndpointDoesNotExists)
 			continue
 		}
 
 		ep.lk.Lock()
 		if !ep.closed {
-			ep.flowCh <- newRemoteChan(stream)
+			ep.flowCh <- flow
 		} else {
-			stream.Stream.CancelRead(QErrStreamEndpointDoesNotExists)
-			stream.Stream.CancelWrite(QErrStreamEndpointDoesNotExists)
+			flow.Stream.CancelRead(QErrStreamEndpointDoesNotExists)
+			flow.Stream.CancelWrite(QErrStreamEndpointDoesNotExists)
 		}
 		ep.lk.Unlock()
 	}
@@ -381,7 +381,7 @@ func (fb *Fabric) CreateEndpoint(name string) (Endpoint, error) {
 	return ep, nil
 }
 
-func (fb *Fabric) DialEndpoint(ctx context.Context, name string) (Flow, error) {
+func (fb *Fabric) DialEndpoint(ctx context.Context, name string) (RawFlow, error) {
 	if !ValidateEndpointName(name) {
 		return nil, ErrNameInvalid
 	}
@@ -428,11 +428,11 @@ func (fb *Fabric) DialEndpoint(ctx context.Context, name string) (Flow, error) {
 		return nil, fmt.Errorf("%w: %s", ErrHostNotFound, owner)
 	}
 
-	stream, err := fb.tr.dialFlow(ctx, nodeAddr, name)
+	flow, err := fb.tr.dialFlow(ctx, nodeAddr, name)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrDialFailed, err)
 	}
-	return newRemoteChan(stream), nil
+	return flow, nil
 }
 
 func (fb *Fabric) ResolveEndpoint(ctx context.Context, req ResolveEndpointRequest) (*ResolveEndpointQuery, error) {

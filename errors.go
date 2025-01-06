@@ -8,9 +8,10 @@ import (
 )
 
 var (
-	ErrFlowClosed     = errors.New("flow closed")
-	ErrEndpointClosed = errors.New("endpoint closed")
-	ErrFabricClosed   = errors.New("fabric closed")
+	ErrFlowTypeMismatch = errors.New("flow: type mismatch")
+	ErrFlowClosed       = errors.New("flow closed")
+	ErrEndpointClosed   = errors.New("endpoint closed")
+	ErrFabricClosed     = errors.New("fabric closed")
 
 	ErrNameInvalid            = errors.New("fabric: names must only contains alphanum, dashes, dots and be less than 128 chars")
 	ErrInvalidCfg             = errors.New("fabric: invalid options")

@@ -16,7 +16,7 @@
   distributed over multiple machines &mdash; capable of establishing
   *flow* :ocean:
 
-## Why?
+## Why? :face_with_raised_eyebrow:
 
 Golang Runtime's concurrency model has two major actors:
 * Computational units: *Goroutines*.
@@ -27,27 +27,14 @@ process**.
 
 Your software may scale to the point it cannot run in a single
 process anymore, you now have *Goroutines* spread in different
-processes (and likely, machines). Maybe they used *Channels* to communicate together asynchronously,
-but now, they can't anymore and you must rewrite parts of your code.
+processes (and likely, machines).
 
 `grinta` aims to generalise those actors, so they can be ported to a
 *distributed* environment with **zero rewriting**.
 
-Simply put, if a *Goroutine* hold an *Endpoint* :round_pushpin:, it can
-accept *Flow* :ocean: requests from others, regardless of whether
-they live in the same process or not.
+## How? :star_struck:
 
-If both *Goroutines* are in the same process, the *Flow* is **really just
-two Channel** (one for each direction). If they live in different process,
-then, the *Fabric* :link: kicks in and allocates
-a **QUIC Bidirectional Stream**, preferably using an already active
-**QUIC connection** to let the two *Goroutines* communicate.
-
-This has one important implication though: you cannot share memory over
-a *Flow*, even if both *goroutines* live in the same process. Otherwise,
-you would have to write specific code depending on where is the *Endpoint*
-:round_pushpin: you are trying to *Dial*, which is exactly what `grinta` want
-to avoid to guarantee its **zero rewrite portability** promise.
+See the `examples/` folder.
 
 ## Features
 

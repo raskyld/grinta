@@ -3,13 +3,10 @@ package grinta
 import (
 	"context"
 	"crypto/tls"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -17,8 +14,7 @@ import (
 	"github.com/hashicorp/memberlist"
 	"github.com/quic-go/quic-go"
 	grintav1alpha1 "github.com/raskyld/grinta/gen/grinta/v1alpha1"
-	"google.golang.org/protobuf/encoding/protowire"
-	"google.golang.org/protobuf/proto"
+	"github.com/raskyld/grinta/pkg/flow"
 )
 
 // TransportConfig represents configuration for the GRINTA protocol.
@@ -65,7 +61,7 @@ type Transport struct {
 	wg sync.WaitGroup
 
 	// GRINTA protocol
-	flowCh   chan *remoteFlow
+	flowCh   chan *streamFlow
 	hostsCxs map[string][]hostCx
 
 	// Memberlist Protocol
@@ -83,13 +79,6 @@ type Transport struct {
 
 type hostCx quic.Connection
 
-type Perspective uint8
-
-const (
-	ServerPerspective Perspective = iota
-	ClientPerspective
-)
-
 func NewTransport(cfg *TransportConfig) (trans *Transport, err error) {
 	if cfg.TlsConfig == nil {
 		return nil, ErrNoTLSConfig
@@ -97,10 +86,10 @@ func NewTransport(cfg *TransportConfig) (trans *Transport, err error) {
 
 	t := &Transport{
 		cfg:      cfg,
-		flowCh:   make(chan *remoteFlow),
+		flowCh:   make(chan *streamFlow, 64),
 		hostsCxs: make(map[string][]hostCx),
-		packetCh: make(chan *memberlist.Packet),
-		streamCh: make(chan net.Conn),
+		packetCh: make(chan *memberlist.Packet, 1024),
+		streamCh: make(chan net.Conn, 64),
 	}
 
 	if cfg.LogHandler == nil {
@@ -207,23 +196,13 @@ func (t *Transport) FinalAdvertiseAddr(addr string, port int) (advIP net.IP, adv
 		return
 	}
 
-	ipPort := strings.Split(t.udpLn.LocalAddr().String(), ":")
-	if len(ipPort) != 2 {
-		panic(fmt.Sprintf("go runtime produced invalid udp addr: %s", t.udpLn.LocalAddr().String()))
-	}
-
-	ip := ipPort[0]
-	parsedPort, err := strconv.Atoi(ipPort[1])
-	if err != nil {
-		panic(fmt.Sprintf("go runtime produced invalid udp port %s", ipPort[1]))
+	udpAddr := t.udpLn.LocalAddr().(*net.UDPAddr)
+	if advIP == nil {
+		advIP = udpAddr.IP
 	}
 
 	if advIP == nil {
-		advIP = net.ParseIP(ip)
-	}
-
-	if advIP == nil {
-		panic(fmt.Sprintf("go runtime produced invalid udp IP %s", ip))
+		panic("could not retrieve IP to advertise")
 	}
 
 	if ip4 := advIP.To4(); ip4 != nil {
@@ -231,7 +210,7 @@ func (t *Transport) FinalAdvertiseAddr(addr string, port int) (advIP net.IP, adv
 	}
 
 	if advPort == 0 {
-		advPort = parsedPort
+		advPort = udpAddr.Port
 	}
 	return
 }
@@ -322,13 +301,11 @@ func (t *Transport) DialAddressTimeout(addr memberlist.Address, timeout time.Dur
 		return nil, err
 	}
 
-	initFrame := &grintav1alpha1.InitFrame{}
-	initFrame.SetMode(grintav1alpha1.StreamMode_STREAM_MODE_GOSSIP)
-
-	return t.initialiseOutboundStream(ctx, stream, hcx, initFrame)
+	streamFlow := newStreamFlow(stream, stream, hcx, grintav1alpha1.StreamMode_STREAM_MODE_GOSSIP, "")
+	return t.initialiseOutboundStream(ctx, streamFlow)
 }
 
-func (t *Transport) dialFlow(ctx context.Context, addr string, dest string) (*remoteFlow, error) {
+func (t *Transport) dialFlow(ctx context.Context, addr string, dest string, bidi bool) (*streamFlow, error) {
 	hcx, err := t.getActiveCx(ctx, memberlist.Address{
 		Addr: addr,
 	})
@@ -342,21 +319,36 @@ func (t *Transport) dialFlow(ctx context.Context, addr string, dest string) (*re
 		return nil, err
 	}
 
-	stream, err := hcx.OpenStreamSync(ctx)
-	if err != nil {
-		t.msink.IncrCounterWithLabels(
-			MetricSErr,
-			1.0,
-			append(mLabels, LabelError.M("cannot_open_stream")),
-		)
-		return nil, err
+	var recv quic.ReceiveStream
+	var send quic.SendStream
+	if bidi {
+		stream, err := hcx.OpenStreamSync(ctx)
+		if err != nil {
+			t.msink.IncrCounterWithLabels(
+				MetricSErr,
+				1.0,
+				append(mLabels, LabelError.M("cannot_open_stream"), LabelStreamDirection.M("bidirectional")),
+			)
+			return nil, err
+		}
+		recv = stream
+		send = stream
+	} else {
+		stream, err := hcx.OpenUniStreamSync(ctx)
+		if err != nil {
+			t.msink.IncrCounterWithLabels(
+				MetricSErr,
+				1.0,
+				append(mLabels, LabelError.M("cannot_open_stream"), LabelStreamDirection.M("unidirectional")),
+			)
+			return nil, err
+		}
+		send = stream
 	}
 
-	initFrame := &grintav1alpha1.InitFrame{}
-	initFrame.SetMode(grintav1alpha1.StreamMode_STREAM_MODE_FLOW)
-	initFrame.SetDestName(dest)
+	stream := newStreamFlow(send, recv, hcx, grintav1alpha1.StreamMode_STREAM_MODE_FLOW, dest)
 
-	return t.initialiseOutboundStream(ctx, stream, hcx, initFrame)
+	return t.initialiseOutboundStream(ctx, stream)
 }
 
 func (t *Transport) StreamCh() <-chan net.Conn {
@@ -460,7 +452,7 @@ func (t *Transport) waitForDatagrams(hcx hostCx) {
 	}
 }
 
-func (t *Transport) handleStreams(hcx hostCx) {
+func (t *Transport) handleStreams(hcx hostCx, bidi bool) {
 	defer t.wg.Done()
 	peer := hcx.RemoteAddr().String()
 
@@ -474,7 +466,19 @@ func (t *Transport) handleStreams(hcx hostCx) {
 	)
 
 	for {
-		stream, err := hcx.AcceptStream(context.Background())
+		var err error
+		var sender quic.SendStream
+		var recv quic.ReceiveStream
+
+		if bidi {
+			stream, gotErr := hcx.AcceptStream(context.Background())
+			err = gotErr
+			sender = stream
+			recv = stream
+		} else {
+			recv, err = hcx.AcceptUniStream(context.Background())
+		}
+
 		if cerr := hcx.Context().Err(); cerr != nil {
 			logger.Warn("connection was broken", LabelError.L(cerr))
 			t.msink.IncrCounterWithLabels(
@@ -482,8 +486,9 @@ func (t *Transport) handleStreams(hcx hostCx) {
 				1.0,
 				append(mLabels, LabelError.M("connection_broken")),
 			)
-			break
+			return
 		}
+
 		if err != nil {
 			logger.Warn("transient error accepting stream", LabelError.L(err))
 			t.msink.IncrCounterWithLabels(
@@ -494,26 +499,22 @@ func (t *Transport) handleStreams(hcx hostCx) {
 			continue
 		}
 
-		// NB: we offload the stream establishment in another goroutine to avoid
-		// a misbehaving peer from blocking us.
-		t.wg.Add(1)
-		go func() {
-			defer t.wg.Done()
-			initCtx, cancel := context.WithTimeout(context.Background(), t.cfg.DialTimeout)
-			defer cancel()
-			swrap, err := t.initialiseInboundStream(initCtx, stream, hcx)
-			if err != nil {
-				logger.Error("failed to establish stream", LabelError.L(err))
-				return
-			}
+		initCtx, cancel := context.WithTimeout(context.Background(), t.cfg.DialTimeout)
+		defer cancel()
 
-			switch swrap.mode {
-			case grintav1alpha1.StreamMode_STREAM_MODE_GOSSIP:
-				t.streamCh <- swrap
-			case grintav1alpha1.StreamMode_STREAM_MODE_FLOW:
-				t.flowCh <- swrap
-			}
-		}()
+		streamFlow := newInboundStreamFlow(sender, recv, hcx)
+		swrap, err := t.initialiseInboundStream(initCtx, streamFlow)
+		if err != nil {
+			logger.Error("failed to establish stream", LabelError.L(err))
+			return
+		}
+
+		switch swrap.mode {
+		case grintav1alpha1.StreamMode_STREAM_MODE_GOSSIP:
+			t.streamCh <- swrap
+		case grintav1alpha1.StreamMode_STREAM_MODE_FLOW:
+			t.flowCh <- swrap
+		}
 	}
 }
 
@@ -619,19 +620,18 @@ func (t *Transport) handleConn(conn quic.Connection, perspective Perspective) (h
 		With(LabelPeerAddr.L(peer), LabelPerspective.L(perspective.String())).
 		Info("new connection established")
 
-	t.wg.Add(2)
+	t.wg.Add(3)
 	go t.waitForDatagrams(conn)
-	go t.handleStreams(conn)
+	go t.handleStreams(conn, true)
+	go t.handleStreams(conn, false)
 	return conn, nil
 }
 
 func (t *Transport) initialiseOutboundStream(
 	ctx context.Context,
-	stream quic.Stream,
-	hcx hostCx,
-	initFrame *grintav1alpha1.InitFrame,
-) (*remoteFlow, error) {
-	peerAddr := hcx.RemoteAddr().String()
+	stream *streamFlow,
+) (*streamFlow, error) {
+	peerAddr := stream.remoteAddr.String()
 	logger := t.logger.With(
 		LabelStreamID.L(stream.StreamID()),
 		LabelPeerAddr.L(peerAddr),
@@ -643,66 +643,44 @@ func (t *Transport) initialiseOutboundStream(
 		LabelPerspective.M(ClientPerspective.String()),
 	)
 
+	initFrame := &grintav1alpha1.InitFrame{}
+	initFrame.SetMode(stream.mode)
+	initFrame.SetDestName(stream.destination)
+
 	frame := &grintav1alpha1.Frame{}
 	frame.SetInit(initFrame)
 
-	buf, err := proto.Marshal(frame)
+	encoder := flow.NewProtoCodec[*grintav1alpha1.Frame](false)
+
+	ack := make(chan error, 1)
+	ackWg := sync.WaitGroup{}
+	ackWg.Add(1)
+	go func() {
+		defer ackWg.Done()
+		ack <- encoder.Encode(stream.SendStream, frame)
+	}()
+
+	var err error
+	select {
+	case err = <-ack:
+	case <-ctx.Done():
+		stream.SendStream.CancelWrite(QErrCanceled)
+		err = ctx.Err()
+	}
+	ackWg.Wait()
+	close(ack)
+
 	if err != nil {
-		logger.Error("unexpected failure to marhsal a protobuf message", LabelError.L(err))
+		t.msink.IncrCounterWithLabels(
+			MetricSErr,
+			1.0,
+			append(
+				mLabels,
+				LabelError.M("cannot_send_init_frame"),
+			),
+		)
+		logger.Warn("stream establishment failed", LabelError.L(err))
 		return nil, err
-	}
-
-	sizeVarint := protowire.AppendVarint(nil, uint64(len(buf)))
-
-	dl, ok := ctx.Deadline()
-	if ok {
-		stream.SetWriteDeadline(dl)
-	}
-
-	// TODO(raskyld): write in one-pass to avoid partial write.
-	vn, err := stream.Write(sizeVarint)
-	if err != nil {
-		t.msink.IncrCounterWithLabels(
-			MetricSErr,
-			1.0,
-			append(
-				mLabels,
-				LabelError.M("cannot_send_init_frame"),
-			),
-		)
-		return nil, fmt.Errorf("%w: %w", ErrStreamWrite, err)
-	}
-
-	bn, err := stream.Write(buf)
-	if err != nil {
-		t.msink.IncrCounterWithLabels(
-			MetricSErr,
-			1.0,
-			append(
-				mLabels,
-				LabelError.M("cannot_send_init_frame"),
-			),
-		)
-		return nil, fmt.Errorf("%w: %w", ErrStreamWrite, err)
-	}
-
-	if bn+vn != len(buf)+len(sizeVarint) {
-		logger.Error(
-			"unexpected mismatch between frame size and bytes written",
-			"expected", len(buf)+len(sizeVarint),
-			"actual", bn+vn,
-			LabelError.L(ErrTooLargeFrame),
-		)
-		t.msink.IncrCounterWithLabels(
-			MetricSErr,
-			1.0,
-			append(
-				mLabels,
-				LabelError.M("init_frame_too_large"),
-			),
-		)
-
-		return nil, ErrTooLargeFrame
 	}
 
 	t.msink.IncrCounterWithLabels(
@@ -710,22 +688,16 @@ func (t *Transport) initialiseOutboundStream(
 		1.0,
 		mLabels,
 	)
+	logger.Debug("stream established")
 
-	return newRemoteFlow(
-		stream,
-		hcx.LocalAddr(),
-		hcx.RemoteAddr(),
-		initFrame.GetMode(),
-		initFrame.GetDestName(),
-	), nil
+	return stream, nil
 }
 
 func (t *Transport) initialiseInboundStream(
 	ctx context.Context,
-	stream quic.Stream,
-	hcx hostCx,
-) (*remoteFlow, error) {
-	peerAddr := hcx.RemoteAddr().String()
+	stream *streamFlow,
+) (*streamFlow, error) {
+	peerAddr := stream.remoteAddr.String()
 	logger := t.logger.With(
 		LabelStreamID.L(stream.StreamID()),
 		LabelPeerAddr.L(peerAddr),
@@ -737,107 +709,51 @@ func (t *Transport) initialiseInboundStream(
 		LabelPerspective.M(ServerPerspective.String()),
 	)
 
-	dl, ok := ctx.Deadline()
-	if ok {
-		stream.SetReadDeadline(dl)
+	decoder := flow.NewProtoCodec[*grintav1alpha1.Frame](false)
+
+	ack := make(chan struct {
+		fr  *grintav1alpha1.Frame
+		err error
+	}, 1)
+	ackWg := sync.WaitGroup{}
+	ackWg.Add(1)
+	go func() {
+		defer ackWg.Done()
+		untyFrame, err := decoder.Decode(stream.ReceiveStream)
+		ack <- struct {
+			fr  *grintav1alpha1.Frame
+			err error
+		}{untyFrame.(*grintav1alpha1.Frame), err}
+	}()
+
+	var frame *grintav1alpha1.Frame
+	var err error
+	select {
+	case result := <-ack:
+		frame = result.fr
+		err = result.err
+	case <-ctx.Done():
+		stream.SendStream.CancelWrite(QErrCanceled)
+		err = ctx.Err()
 	}
+	ackWg.Wait()
+	close(ack)
 
-	// First we want to read the size to know how much we need to allocate.
-	var sizeBytes [binary.MaxVarintLen64]byte
-	var n int
-	for {
-		m, err := stream.Read(sizeBytes[n : n+1])
-		if serr := stream.Context().Err(); serr != nil {
-			logger.Warn("stream was broken", LabelError.L(serr))
-			t.msink.IncrCounterWithLabels(
-				MetricSErr,
-				1.0,
-				append(mLabels, LabelError.M("stream_broken")),
-			)
-			return nil, serr
-		}
-		if err != nil {
-			if ctx.Err() != nil {
-				t.msink.IncrCounterWithLabels(
-					MetricSErr,
-					1.0,
-					append(mLabels, LabelError.M("stream_read_timeout")),
-				)
-				return nil, ctx.Err()
-			}
-
-			logger.Warn("transient error reading stream", LabelError.L(err))
-		}
-		if m > 0 {
-			byteRead := sizeBytes[n]
-			n = n + m
-			if byteRead < 0x80 {
-				// MSB is 0, end of varint.
-				break
-			}
-		}
-	}
-
-	sizeVarint, rdVarint := protowire.ConsumeVarint(sizeBytes[:n])
-	if rdVarint < 0 {
-		return nil, fmt.Errorf("%w: %w", ErrProtocolViolation, protowire.ParseError(rdVarint))
-	}
-
-	frameBytes := make([]byte, sizeVarint)
-	n = 0
-	for {
-		m, err := stream.Read(frameBytes[n:])
-		n = n + m
-		if serr := stream.Context().Err(); serr != nil {
-			logger.Warn("stream was broken", LabelError.L(serr))
-			t.msink.IncrCounterWithLabels(
-				MetricSErr,
-				1.0,
-				append(mLabels, LabelError.M("stream_broken")),
-			)
-			return nil, serr
-		}
-		if err != nil {
-			if ctx.Err() != nil {
-				t.msink.IncrCounterWithLabels(
-					MetricSErr,
-					1.0,
-					append(mLabels, LabelError.M("stream_read_timeout")),
-				)
-				return nil, ctx.Err()
-			}
-
-			logger.Warn("transient error reading stream", LabelError.L(err))
-		}
-
-		if uint64(n) == sizeVarint {
-			break
-		}
-
-		if err == nil && m < 1 {
-			panic("unreachable: if no bytes are written, we shouldn't have a nil error")
-		}
-	}
-
-	var frame grintav1alpha1.Frame
-	err := proto.Unmarshal(frameBytes, &frame)
 	if err != nil {
-		logger.Warn("grinta protocol violation: malformed frame", LabelError.L(err))
-		stream.CancelRead(QErrStreamProtocolViolation)
-		stream.CancelWrite(QErrStreamProtocolViolation)
+		logger.Error("could not retrieve init frame", LabelError.L(err))
+		stream.Cancel(QErrStreamProtocolViolation)
 		t.msink.IncrCounterWithLabels(
 			MetricSErr,
 			1.0,
-			append(mLabels, LabelError.M("protocol_violation")),
+			append(mLabels, LabelError.M("no_init_frame")),
 		)
 		return nil, ErrProtocolViolation
 	}
 
 	initFrame := frame.GetInit()
-	if !ok || initFrame == nil {
+	if initFrame == nil {
 		logger.Warn("grinta protocol violation: first frame is not init one")
-		stream.CancelRead(QErrStreamProtocolViolation)
-		stream.CancelWrite(QErrStreamProtocolViolation)
+		stream.Cancel(QErrStreamProtocolViolation)
 		t.msink.IncrCounterWithLabels(
 			MetricSErr,
 			1.0,
@@ -846,22 +762,24 @@ func (t *Transport) initialiseInboundStream(
 		return nil, ErrProtocolViolation
 	}
 
-	swrap := newRemoteFlow(
-		stream,
-		hcx.LocalAddr(),
-		hcx.RemoteAddr(),
-		initFrame.GetMode(),
-		initFrame.GetDestName(),
-	)
-
 	t.msink.IncrCounterWithLabels(
 		MetricSCount,
 		1.0,
-		append(mLabels, LabelStreamMode.M(swrap.mode.String())),
+		append(mLabels, LabelStreamMode.M(initFrame.GetMode().String())),
 	)
 
-	return swrap, nil
+	stream.destination = initFrame.GetDestName()
+	stream.mode = initFrame.GetMode()
+
+	return stream, nil
 }
+
+type Perspective uint8
+
+const (
+	ServerPerspective Perspective = iota
+	ClientPerspective
+)
 
 func (p Perspective) String() string {
 	switch p {
@@ -871,4 +789,76 @@ func (p Perspective) String() string {
 		return "client"
 	}
 	panic("unreachable")
+}
+
+type streamFlow struct {
+	quic.ReceiveStream
+	quic.SendStream
+
+	mode                  grintav1alpha1.StreamMode
+	localAddr, remoteAddr net.Addr
+	destination           string
+}
+
+var _ net.Conn = (*streamFlow)(nil)
+
+func (s *streamFlow) StreamID() quic.StreamID {
+	if s.ReceiveStream != nil {
+		return s.ReceiveStream.StreamID()
+	}
+	if s.SendStream != nil {
+		return s.SendStream.StreamID()
+	}
+	panic("unable to retrieve StreamID both stream direction are nil")
+}
+
+func (s *streamFlow) LocalAddr() net.Addr {
+	return s.localAddr
+}
+
+func (s *streamFlow) SetDeadline(t time.Time) error {
+	return errors.Join(s.SetReadDeadline(t), s.SetWriteDeadline(t))
+}
+
+func (s *streamFlow) RemoteAddr() net.Addr {
+	return s.remoteAddr
+}
+
+func (s *streamFlow) Cancel(err quic.StreamErrorCode) {
+	if s.ReceiveStream != nil {
+		s.ReceiveStream.CancelRead(err)
+	}
+	if s.SendStream != nil {
+		s.SendStream.CancelWrite(err)
+	}
+}
+
+func newStreamFlow(
+	send quic.SendStream,
+	recv quic.ReceiveStream,
+	hcx hostCx,
+	mode grintav1alpha1.StreamMode,
+	destination string,
+) *streamFlow {
+	return &streamFlow{
+		mode:          mode,
+		localAddr:     hcx.LocalAddr(),
+		remoteAddr:    hcx.RemoteAddr(),
+		destination:   destination,
+		ReceiveStream: recv,
+		SendStream:    send,
+	}
+}
+
+func newInboundStreamFlow(
+	send quic.SendStream,
+	recv quic.ReceiveStream,
+	hcx hostCx,
+) *streamFlow {
+	return &streamFlow{
+		localAddr:     hcx.LocalAddr(),
+		remoteAddr:    hcx.RemoteAddr(),
+		ReceiveStream: recv,
+		SendStream:    send,
+	}
 }

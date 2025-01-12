@@ -9,8 +9,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hashicorp/go-metrics"
 	"github.com/hashicorp/serf/serf"
 	grintav1alpha1 "github.com/raskyld/grinta/gen/grinta/v1alpha1"
+	"github.com/raskyld/grinta/pkg/flow"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -20,21 +22,25 @@ const MaxReasonBytes = 255
 var InvalidEndpointName = regexp.MustCompile(`[^A-Za-z0-9\-\.]+`)
 
 type Fabric struct {
-	config        config
-	serf          *serf.Serf
+	config config
+	logger *slog.Logger
+
+	// gossip
+	dir     *nameDirectory
+	serf    *serf.Serf
+	eventCh chan serf.Event
+
+	// transport
 	tr            *Transport
-	logger        *slog.Logger
-	dir           *nameDirectory
 	localIP       net.IP
 	localPort     int
 	localAddr     string
 	localNodeName string
 
-	eventCh chan serf.Event
-
 	// endpoints management
-	localEPs map[string]*endpoint
-	epGC     chan *endpoint
+	localEPs   map[string]*endpoint
+	epGC       chan *endpoint
+	epGCWriter sync.WaitGroup
 
 	// synchronisation
 	lk sync.Mutex
@@ -100,6 +106,11 @@ func Create(opts ...Option) (*Fabric, error) {
 	}
 	fb.config.serfCfg.MemberlistConfig.Logger = fb.config.serfCfg.Logger
 
+	// Metrics implementations.
+	if fb.config.msink == nil {
+		fb.config.msink = metrics.Default()
+	}
+
 	// Initiate GRINTA transport layer.
 	tr, err := NewTransport(&fb.config.trCfg)
 	if err != nil {
@@ -158,10 +169,8 @@ func (fb *Fabric) JoinCluster() error {
 				"expected", len(fb.config.neighbours),
 			)
 		}
-		return nil
 	}
-
-	return fmt.Errorf("%w: %s", ErrJoinCluster, "no neighbours provided")
+	return nil
 }
 
 func (fb *Fabric) Topology() []serf.Member {
@@ -178,20 +187,26 @@ func (fb *Fabric) Shutdown() error {
 	fb.shutdown = true
 	close(fb.shutdownCh)
 	fb.lk.Unlock()
+
 	start := time.Now()
 	fb.logger.Info("shutting down...")
+
+	fb.logger.Info("shutdown: endpoint garbage collector")
+	fb.epGCWriter.Wait()
+
 	fb.logger.Info("shutdown: leave cluster")
 	fb.serf.Leave()
 
 	// Phase 2: Drop all resources.
 	close(fb.dropCh)
-	fb.logger.Info("shutdown: release resources")
+	fb.logger.Info("shutdown: release gossip resources")
 	fb.serf.Shutdown()
 	fb.dir.close()
 
-	fb.logger.Info("shutdown: wait for resources")
+	fb.logger.Info("shutdown: wait for sub-tasks to finish")
 	fb.wg.Wait()
 	<-fb.serf.ShutdownCh()
+
 	fb.logger.Info("shutdown: completed", LabelDuration.L(time.Since(start)))
 	return nil
 }
@@ -256,32 +271,61 @@ func (fb *Fabric) handleEvents() {
 func (fb *Fabric) handleFlow() {
 	defer fb.wg.Done()
 	for {
-		// TODO(raskyld): add metrics
-		var flow *remoteFlow
+		var fl *streamFlow
 		select {
-		case flow = <-fb.tr.flowCh:
+		case fl = <-fb.tr.flowCh:
 		case <-fb.shutdownCh:
 			fb.logger.Info("shutdown: stop accepting inbound flow establishments")
 			return
 		}
 		fb.lk.Lock()
-		ep, exists := fb.localEPs[flow.destination]
+		ep, exists := fb.localEPs[fl.destination]
 		fb.lk.Unlock()
 
 		if !exists {
-			flow.Stream.CancelRead(QErrStreamEndpointDoesNotExists)
-			flow.Stream.CancelWrite(QErrStreamEndpointDoesNotExists)
+			fl.Cancel(QErrStreamEndpointDoesNotExists)
 			continue
 		}
 
 		ep.lk.Lock()
 		if !ep.closed {
-			ep.flowCh <- flow
+			ep.writers.Add(1)
+			ep.lk.Unlock()
+
+			ctx, cancel := context.WithTimeout(context.Background(), fb.tr.cfg.DialTimeout)
+
+			select {
+			case ep.flowCh <- struct {
+				flow.RawReceiver
+				flow.RawSender
+			}{
+				flow.RemoteReceiver{ReceiveStream: fl.ReceiveStream},
+				flow.RemoteSender{SendStream: fl.SendStream},
+			}:
+			case <-ep.closeCh:
+				fl.Cancel(QErrBufferFull)
+			case <-ctx.Done():
+				fl.Cancel(QErrBufferFull)
+				fb.config.msink.IncrCounterWithLabels(
+					MetricFlowErr,
+					1.0,
+					[]metrics.Label{
+						LabelEndpointName.M(fl.destination),
+						LabelError.M("buffer_full"),
+						LabelPerspective.M(ServerPerspective.String()),
+					},
+				)
+				fb.logger.Error(
+					"failed to deliver flow establishment: buffer is full",
+					LabelEndpointName.L(fl.destination),
+				)
+			}
+			ep.writers.Done()
+			cancel()
 		} else {
-			flow.Stream.CancelRead(QErrStreamEndpointDoesNotExists)
-			flow.Stream.CancelWrite(QErrStreamEndpointDoesNotExists)
+			ep.lk.Unlock()
+			fl.Cancel(QErrStreamEndpointDoesNotExists)
 		}
-		ep.lk.Unlock()
 	}
 }
 
@@ -292,54 +336,53 @@ func (fb *Fabric) handleEndpointGC() {
 		select {
 		case ep = <-fb.epGC:
 		case <-fb.shutdownCh:
-			fb.logger.Info("shutdown: close all local endpoints")
 			fb.lk.Lock()
 			for _, ep := range fb.localEPs {
-				ep.close()
+				ep.close(true)
+				fb.gcEndpoint(ep)
 			}
-			fb.lk.Unlock()
 			close(fb.epGC)
+			fb.lk.Unlock()
 			return
 		}
 
 		fb.lk.Lock()
-		fbEp, has := fb.localEPs[ep.name]
-		if has {
-			if fbEp == ep {
-				delete(fb.localEPs, ep.name)
-			} else {
-				// we already reclaimed the name with another endpoint.
-				fb.lk.Unlock()
-				continue
-			}
-		}
-
-		record := &grintav1alpha1.NameClaim{}
-		record.SetNodeName(fb.localNodeName)
-		record.SetMode(grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_UNCLAIM)
-		record.SetEndpointName(ep.name)
-
-		err := fb.dir.record(record, true)
+		fb.gcEndpoint(ep)
 		fb.lk.Unlock()
-		if err != nil {
-			// requeue for retry
-			fb.epGC <- ep
-			continue
-		}
-
-		payload, err := proto.Marshal(record)
-		if err != nil {
-			panic(fmt.Sprintf("unexpected fail to marshal: %s", err))
-		}
-
-		err = fb.serf.UserEvent("name_record", payload, true)
-		if err != nil {
-			// requeue for retry
-			fb.epGC <- ep
-		}
-
-		fb.logger.Debug("released endpoint", LabelEndpointName.L(ep.name))
 	}
+}
+
+func (fb *Fabric) gcEndpoint(ep *endpoint) error {
+	fbEp, has := fb.localEPs[ep.name]
+	if has {
+		if fbEp == ep {
+			delete(fb.localEPs, ep.name)
+		} else {
+			// we already reclaimed the name with another endpoint.
+			return nil
+		}
+	}
+
+	record := &grintav1alpha1.NameClaim{}
+	record.SetNodeName(fb.localNodeName)
+	record.SetMode(grintav1alpha1.NameClaimMode_NAME_CLAIM_MODE_UNCLAIM)
+	record.SetEndpointName(ep.name)
+
+	if err := fb.dir.record(record, true); err != nil {
+		return err
+	}
+
+	payload, err := proto.Marshal(record)
+	if err != nil {
+		panic(fmt.Sprintf("unexpected fail to marshal: %s", err))
+	}
+
+	if err := fb.serf.UserEvent("name_record", payload, true); err != nil {
+		return err
+	}
+
+	fb.logger.Debug("released endpoint", LabelEndpointName.L(ep.name))
+	return nil
 }
 
 func (fb *Fabric) CreateEndpoint(name string) (Endpoint, error) {
@@ -376,26 +419,58 @@ func (fb *Fabric) CreateEndpoint(name string) (Endpoint, error) {
 		return nil, err
 	}
 
-	ep := newEndpoint(name, fb.epGC)
+	ep := newEndpoint(name, func(e *endpoint) {
+		fb.lk.Lock()
+		if fb.shutdown {
+			fb.lk.Unlock()
+			return
+		}
+		fb.epGCWriter.Add(1)
+		fb.lk.Unlock()
+
+		select {
+		case <-fb.shutdownCh:
+		case fb.epGC <- e:
+		}
+
+		fb.epGCWriter.Done()
+	})
 	fb.localEPs[name] = ep
 	return ep, nil
 }
 
-func (fb *Fabric) DialEndpoint(ctx context.Context, name string) (RawFlow, error) {
+func (fb *Fabric) ScanEndpoint(prefix string) ([]string, error) {
+	return fb.dir.scan(prefix)
+}
+
+func (fb *Fabric) DialEndpoint(ctx context.Context, name string) (flow.RawSender, error) {
+	raw, err := fb.dialEndpoint(ctx, name, false)
+	if err != nil {
+		return nil, err
+	}
+
+	return raw.RawSender, nil
+}
+
+func (fb *Fabric) DialEndpointBidi(ctx context.Context, name string) (raw flow.Raw, err error) {
+	return fb.dialEndpoint(ctx, name, true)
+}
+
+func (fb *Fabric) dialEndpoint(ctx context.Context, name string, bidirectional bool) (raw flow.Raw, err error) {
 	if !ValidateEndpointName(name) {
-		return nil, ErrNameInvalid
+		return raw, ErrNameInvalid
 	}
 
 	fb.lk.Lock()
 	shutdown := fb.shutdown
 	fb.lk.Unlock()
 	if shutdown {
-		return nil, ErrFabricClosed
+		return raw, ErrFabricClosed
 	}
 
 	owner, _, err := fb.dir.resolveWithCluster(ctx, name)
 	if err != nil {
-		return nil, err
+		return raw, err
 	}
 
 	if owner == fb.localNodeName {
@@ -403,16 +478,29 @@ func (fb *Fabric) DialEndpoint(ctx context.Context, name string) (RawFlow, error
 		ep, has := fb.localEPs[name]
 		fb.lk.Unlock()
 		if !has {
-			return nil, ErrNameResolution
+			return raw, ErrNameResolution
 		}
-		server, client := newLocalChan()
+
+		var inbound *flow.LocalFlow
+		outbound := flow.NewLocalFlow(1024)
+		raw.RawSender = outbound
+
+		if bidirectional {
+			inbound = flow.NewLocalFlow(1024)
+			raw.RawReceiver = inbound
+		}
+
 		ep.lk.Lock()
 		defer ep.lk.Unlock()
 		if ep.closed {
-			return nil, ErrNameResolution
+			return raw, ErrNameResolution
 		}
-		ep.flowCh <- server
-		return client, nil
+		ep.flowCh <- flow.Raw{
+			RawReceiver: outbound,
+			RawSender:   inbound,
+		}
+
+		return raw, nil
 	}
 
 	nodes := fb.serf.Members()
@@ -425,14 +513,23 @@ func (fb *Fabric) DialEndpoint(ctx context.Context, name string) (RawFlow, error
 	}
 
 	if nodeAddr == "" {
-		return nil, fmt.Errorf("%w: %s", ErrHostNotFound, owner)
+		return raw, fmt.Errorf("%w: %s", ErrHostNotFound, owner)
 	}
 
-	flow, err := fb.tr.dialFlow(ctx, nodeAddr, name)
+	streamFlow, err := fb.tr.dialFlow(ctx, nodeAddr, name, bidirectional)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrDialFailed, err)
+		return raw, fmt.Errorf("%w: %w", ErrDialFailed, err)
 	}
-	return flow, nil
+
+	raw.RawSender = flow.RemoteSender{SendStream: streamFlow.SendStream}
+	if bidirectional {
+		if streamFlow.ReceiveStream == nil {
+			panic("asked bidirectional but returned a nil receive stream")
+		}
+		raw.RawReceiver = flow.RemoteReceiver{ReceiveStream: streamFlow.ReceiveStream}
+	}
+
+	return raw, nil
 }
 
 func (fb *Fabric) ResolveEndpoint(ctx context.Context, req ResolveEndpointRequest) (*ResolveEndpointQuery, error) {

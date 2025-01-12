@@ -10,18 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/raskyld/grinta/pkg/flow"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-type TestString string
-
-func (ts TestString) Marshal() ([]byte, error) {
-	return []byte(ts), nil
-}
-
-func (ts TestString) Clone() interface{} {
-	return ts
-}
 
 func TestFabric(t *testing.T) {
 	n1handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
@@ -110,23 +102,30 @@ func TestFabric(t *testing.T) {
 	})
 
 	ep, err := fbNode1.CreateEndpoint("srv1")
-	values := make(chan interface{})
+	values := make(chan []byte)
 	require.NoError(t, err)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for {
-			rcv, err := ep.Accept(context.Background())
+			rcv, _, err := ep.Accept(context.Background())
 			if err != nil {
 				t.Logf("error when accepting: %s", err)
 				break
 			}
+
+			flowRcv := flow.NewReceiver[[]byte](
+				rcv,
+				flow.NewBytesCodec(true),
+				64,
+			)
+
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				for {
-					val, err := rcv.ReadRaw(context.Background())
+					val, err := flowRcv.Recv(context.Background())
 					if err != nil {
 						break
 					}
@@ -140,20 +139,36 @@ func TestFabric(t *testing.T) {
 
 	t.Run("node1 can dial endpoint srv1 which is local", func(t *testing.T) {
 		prod, err := fbNode1.DialEndpoint(context.Background(), "srv1")
-		require.NoError(t, err)
-		prod.WriteRaw(context.Background(), TestString("hello!"))
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		flowSend := flow.NewSender[[]byte](
+			prod,
+			flow.NewBytesCodec(true),
+			64,
+		)
+
+		flowSend.Send(context.Background(), []byte("hello!"))
 		val := <-values
-		castedVal := val.(TestString)
-		require.Equal(t, "hello!", string(castedVal))
+		assert.Equal(t, "hello!", string(val))
 	})
 
 	t.Run("node2 can dial endpoint srv1 which is remote", func(t *testing.T) {
 		prod, err := fbNode2.DialEndpoint(context.Background(), "srv1")
-		require.NoError(t, err)
-		prod.WriteRaw(context.Background(), TestString("hello2!"))
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		flowSend := flow.NewSender[[]byte](
+			prod,
+			flow.NewBytesCodec(true),
+			64,
+		)
+
+		flowSend.Send(context.Background(), []byte("hello remote!"))
 		val := <-values
-		castedVal := val.([]byte)
-		require.Equal(t, "hello2!", string(castedVal))
+		assert.Equal(t, "hello remote!", string(val))
 	})
 
 	fbNode1.Shutdown()

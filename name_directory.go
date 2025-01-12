@@ -9,12 +9,13 @@ import (
 	"time"
 
 	grintav1alpha1 "github.com/raskyld/grinta/gen/grinta/v1alpha1"
+	"github.com/raskyld/grinta/pkg/radix"
 )
 
 // nameDirectory is an eventually consistent and distributed radix `Tree`
 // containing information about where each endpoint lives.
 type nameDirectory struct {
-	d       *Tree[*nameRecord]
+	d       *radix.Tree[*nameRecord]
 	lk      sync.RWMutex
 	closeCh chan struct{}
 
@@ -43,7 +44,7 @@ type conflictRecord struct {
 
 func newNameDir(logger *slog.Logger, fabric FabricControlPlane, localNodeName string) *nameDirectory {
 	dir := &nameDirectory{
-		d:               NewTree[*nameRecord](),
+		d:               radix.New[*nameRecord](),
 		activeConflicts: make(map[string]*conflictRecord),
 		logger:          logger,
 		conflictTimeout: 10 * time.Second,
@@ -57,33 +58,6 @@ func newNameDir(logger *slog.Logger, fabric FabricControlPlane, localNodeName st
 	go dir.handleConflicts()
 
 	return dir
-}
-
-func newTestableNameDir(logger *slog.Logger, fabric FabricControlPlane, localNodeName string) *nameDirectory {
-	dir := &nameDirectory{
-		d:               NewTree[*nameRecord](),
-		activeConflicts: make(map[string]*conflictRecord),
-		logger:          logger,
-		conflictTimeout: 3 * time.Second,
-		conflictTicker:  time.NewTicker(200 * time.Millisecond),
-		closeCh:         make(chan struct{}, 1),
-		fb:              fabric,
-		localNodeName:   localNodeName,
-	}
-
-	dir.wg.Add(1)
-	go dir.handleConflicts()
-
-	return dir
-}
-
-func (dir *nameDirectory) getNamesWithConflict() (conflicts []string) {
-	dir.lk.RLock()
-	defer dir.lk.RUnlock()
-	for name := range dir.activeConflicts {
-		conflicts = append(conflicts, name)
-	}
-	return
 }
 
 func (dir *nameDirectory) resolve(name string) (string, *grintav1alpha1.NameClaim, error) {

@@ -4,13 +4,18 @@ import (
 	"context"
 	"io"
 	"sync"
+
+	"github.com/raskyld/grinta/pkg/flow"
 )
 
 // Endpoint is resolvable on a `Fabric` and allows the owner to
 // `Accept` inbound `Flow`.
 type Endpoint interface {
 	Name() string
-	Accept(context.Context) (RawFlow, error)
+	// Accept will block until the context is canceled or a flow establishment
+	// request is received, it always returns a `RawReceiver` and
+	// MAY return a non-nil `RawSender` in case the flow is bidirectional.
+	Accept(context.Context) (flow.RawReceiver, flow.RawSender, error)
 	io.Closer
 }
 
@@ -21,17 +26,18 @@ type endpoint struct {
 
 	closed  bool
 	closeCh chan struct{}
+	writers sync.WaitGroup
 	lk      sync.Mutex
 
-	epGC   chan<- *endpoint
-	flowCh chan RawFlow
+	epGC   func(*endpoint)
+	flowCh chan flow.Raw
 }
 
-func newEndpoint(name string, gc chan<- *endpoint) *endpoint {
+func newEndpoint(name string, garbageCollectorCallback func(*endpoint)) *endpoint {
 	return &endpoint{
-		epGC:    gc,
+		epGC:    garbageCollectorCallback,
 		name:    name,
-		flowCh:  make(chan RawFlow),
+		flowCh:  make(chan flow.Raw, 64),
 		closeCh: make(chan struct{}, 1),
 	}
 }
@@ -40,34 +46,25 @@ func (ep *endpoint) Name() string {
 	return ep.name
 }
 
-func (ep *endpoint) Accept(ctx context.Context) (RawFlow, error) {
+func (ep *endpoint) Accept(ctx context.Context) (flow.RawReceiver, flow.RawSender, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-ep.closeCh:
-		return nil, ErrEndpointClosed
+		return nil, nil, ctx.Err()
 	case inboundChan := <-ep.flowCh:
-		if inboundChan == nil {
-			return nil, ErrEndpointClosed
+		if inboundChan.RawReceiver == nil {
+			return nil, nil, ErrEndpointClosed
 		}
-		return inboundChan, nil
+		return inboundChan.RawReceiver, inboundChan.RawSender, nil
 	}
 }
 
 func (ep *endpoint) Close() error {
-	ep.lk.Lock()
-	defer ep.lk.Unlock()
-	if ep.closed {
-		return nil
-	}
-
-	ep.closed = true
-	ep.epGC <- ep
-	close(ep.flowCh)
-	return nil
+	return ep.close(false)
 }
 
-func (ep *endpoint) close() error {
+// since close may be initiated by the Endpoint Garbage Collector,
+// we need a way to know if calling the callback is needed.
+func (ep *endpoint) close(plannedForGc bool) error {
 	ep.lk.Lock()
 	defer ep.lk.Unlock()
 	if ep.closed {
@@ -75,6 +72,12 @@ func (ep *endpoint) close() error {
 	}
 
 	ep.closed = true
+	close(ep.closeCh)
+	ep.writers.Wait()
 	close(ep.flowCh)
+
+	if !plannedForGc {
+		ep.epGC(ep)
+	}
 	return nil
 }

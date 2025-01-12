@@ -9,9 +9,9 @@ import (
 
 var (
 	ErrFlowTypeMismatch = errors.New("flow: type mismatch")
-	ErrFlowClosed       = errors.New("flow closed")
-	ErrEndpointClosed   = errors.New("endpoint closed")
-	ErrFabricClosed     = errors.New("fabric closed")
+
+	ErrEndpointClosed = errors.New("endpoint closed")
+	ErrFabricClosed   = errors.New("fabric closed")
 
 	ErrNameInvalid            = errors.New("fabric: names must only contains alphanum, dashes, dots and be less than 128 chars")
 	ErrInvalidCfg             = errors.New("fabric: invalid options")
@@ -45,6 +45,14 @@ const (
 
 	// QErrStreamClosed is sent when a stream is shutting down.
 	QErrStreamClosed = quic.StreamErrorCode(0xC)
+
+	// QErrBufferFull is returned when an endpoint is not `Accept`-ing
+	// flow establishment request fast enough, which cause back-pressure.
+	QErrBufferFull = quic.StreamErrorCode(0xBF)
+
+	// QErrCanceled is returned when the stream establishement request
+	// has been cancaled by the initiator.
+	QErrCanceled = quic.StreamErrorCode(0xCA)
 )
 
 var (

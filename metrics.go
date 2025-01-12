@@ -22,6 +22,13 @@ var (
 	// establishing QUIC streams.
 	MetricSErr = []string{"grinta", "stream", "errors"}
 
+	// MetricFlowCount is the amount of flow established.
+	MetricFlowCount = []string{"grinta", "flow", "established", "count"}
+
+	// MetricFlowErr is the amount of errors emitted while
+	// establishing flow.
+	MetricFlowErr = []string{"grinta", "flow", "errors"}
+
 	// MetricConnCount is the amount of QUIC connections established.
 	MetricConnCount = []string{"grinta", "connection", "established", "count"}
 
@@ -33,14 +40,15 @@ var (
 type TelemetryLabel string
 
 const (
-	LabelError        TelemetryLabel = "error"
-	LabelPeerAddr     TelemetryLabel = "peer_addr"
-	LabelPeerName     TelemetryLabel = "peer_name"
-	LabelStreamMode   TelemetryLabel = "stream_mode"
-	LabelStreamID     TelemetryLabel = "stream_id"
-	LabelPerspective  TelemetryLabel = "perspective"
-	LabelEndpointName TelemetryLabel = "endpoint_name"
-	LabelDuration     TelemetryLabel = "duration"
+	LabelError           TelemetryLabel = "error"
+	LabelPeerAddr        TelemetryLabel = "peer_addr"
+	LabelPeerName        TelemetryLabel = "peer_name"
+	LabelStreamMode      TelemetryLabel = "stream_mode"
+	LabelStreamDirection TelemetryLabel = "stream_direction"
+	LabelStreamID        TelemetryLabel = "stream_id"
+	LabelPerspective     TelemetryLabel = "perspective"
+	LabelEndpointName    TelemetryLabel = "endpoint_name"
+	LabelDuration        TelemetryLabel = "duration"
 )
 
 func (lab TelemetryLabel) M(val string) metrics.Label {

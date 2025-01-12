@@ -9,6 +9,7 @@ import (
 	"time"
 
 	grintav1alpha1 "github.com/raskyld/grinta/gen/grinta/v1alpha1"
+	"github.com/raskyld/grinta/pkg/radix"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -22,11 +23,38 @@ func (m *MockFabricControlPlane) ResolveEndpoint(ctx context.Context, req Resolv
 	return args.Get(0).(*ResolveEndpointQuery), args.Error(1)
 }
 
+func newTestableNameDir(logger *slog.Logger, fabric FabricControlPlane, localNodeName string) *nameDirectory {
+	dir := &nameDirectory{
+		d:               radix.New[*nameRecord](),
+		activeConflicts: make(map[string]*conflictRecord),
+		logger:          logger,
+		conflictTimeout: 3 * time.Second,
+		conflictTicker:  time.NewTicker(200 * time.Millisecond),
+		closeCh:         make(chan struct{}, 1),
+		fb:              fabric,
+		localNodeName:   localNodeName,
+	}
+
+	dir.wg.Add(1)
+	go dir.handleConflicts()
+
+	return dir
+}
+
+func (dir *nameDirectory) getNamesWithConflict() (conflicts []string) {
+	dir.lk.RLock()
+	defer dir.lk.RUnlock()
+	for name := range dir.activeConflicts {
+		conflicts = append(conflicts, name)
+	}
+	return
+}
+
 func TestNameDirectory_SynchronousRev(t *testing.T) {
 	g1 := &MockFabricControlPlane{
 		m: &mock.Mock{},
 	}
-	t1 := newNameDir(slog.Default(), g1, "t1")
+	t1 := newTestableNameDir(slog.Default(), g1, "t1")
 
 	ep1 := &grintav1alpha1.NameClaim{}
 	ep1.SetEndpointName("ep1")
@@ -53,7 +81,7 @@ func TestNameDirectory_resolve(t *testing.T) {
 	g1 := &MockFabricControlPlane{
 		m: &mock.Mock{},
 	}
-	t1 := newNameDir(slog.Default(), g1, "t1")
+	t1 := newTestableNameDir(slog.Default(), g1, "t1")
 
 	ep1 := &grintav1alpha1.NameClaim{}
 	ep1.SetEndpointName("ep1")
@@ -93,7 +121,7 @@ func TestNameDirectory_resolveWithCluster(t *testing.T) {
 	g1 := &MockFabricControlPlane{
 		m: &mock.Mock{},
 	}
-	t1 := newNameDir(slog.Default(), g1, "t1")
+	t1 := newTestableNameDir(slog.Default(), g1, "t1")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -140,7 +168,7 @@ func TestNameDirectory_ScanPrefix(t *testing.T) {
 	g1 := &MockFabricControlPlane{
 		m: &mock.Mock{},
 	}
-	t1 := newNameDir(slog.Default(), g1, "t1")
+	t1 := newTestableNameDir(slog.Default(), g1, "t1")
 
 	ep1 := &grintav1alpha1.NameClaim{}
 	ep1.SetEndpointName("ep1")
@@ -176,7 +204,7 @@ func TestNameDirectory_ConflictAvoided(t *testing.T) {
 	g1 := &MockFabricControlPlane{
 		m: &mock.Mock{},
 	}
-	t1 := newNameDir(slog.Default(), g1, "t1")
+	t1 := newTestableNameDir(slog.Default(), g1, "t1")
 
 	ep1 := &grintav1alpha1.NameClaim{}
 	ep1.SetEndpointName("ep1")

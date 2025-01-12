@@ -15,6 +15,7 @@ type config struct {
 	trCfg        TransportConfig
 	logHandler   slog.Handler
 	metricLabels []metrics.Label
+	msink        metrics.MetricSink
 	neighbours   []string
 }
 
@@ -127,6 +128,7 @@ func WithMetricSink(ms metrics.MetricSink) Option {
 			ms = &metrics.BlackholeSink{}
 		}
 		c.trCfg.MetricSink = ms
+		c.msink = ms
 		return nil
 	}
 }
@@ -159,7 +161,13 @@ func WithGracePeriod(period time.Duration) Option {
 // cluster.
 func WithNeighbours(neighbours []string) Option {
 	return func(c *config) error {
-		c.neighbours = neighbours
+		nbs := make([]string, 0, len(neighbours))
+		for _, nb := range neighbours {
+			if nb != "" {
+				nbs = append(nbs, nb)
+			}
+		}
+		c.neighbours = nbs
 		return nil
 	}
 }

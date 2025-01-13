@@ -58,10 +58,10 @@ func Create(opts ...Option) (*Fabric, error) {
 	fb := &Fabric{
 		eventCh:  make(chan serf.Event, 512),
 		localEPs: make(map[string]*endpoint),
-		epGC:     make(chan *endpoint),
+		epGC:     make(chan *endpoint, 64),
 
-		shutdownCh: make(chan struct{}, 1),
-		dropCh:     make(chan struct{}, 1),
+		shutdownCh: make(chan struct{}),
+		dropCh:     make(chan struct{}),
 	}
 
 	// Fine-tune Serf config.
@@ -221,8 +221,9 @@ func (fb *Fabric) handleEvents() {
 			return
 		}
 
-		fb.logger.Debug("event received", "event_type", event.EventType().String(), "event", event.String())
 		switch event := event.(type) {
+		case serf.MemberEvent:
+
 		case serf.UserEvent:
 			switch event.Name {
 			case "name_record":
@@ -295,17 +296,14 @@ func (fb *Fabric) handleFlow() {
 			ctx, cancel := context.WithTimeout(context.Background(), fb.tr.cfg.DialTimeout)
 
 			select {
-			case ep.flowCh <- struct {
-				flow.RawReceiver
-				flow.RawSender
-			}{
-				flow.RemoteReceiver{ReceiveStream: fl.ReceiveStream},
-				flow.RemoteSender{SendStream: fl.SendStream},
+			case ep.flowCh <- flow.Raw{
+				RawReceiver: flow.RemoteReceiver{ReceiveStream: fl.ReceiveStream},
+				RawSender:   flow.RemoteSender{SendStream: fl.SendStream},
 			}:
 			case <-ep.closeCh:
-				fl.Cancel(QErrBufferFull)
+				fl.Cancel(QErrStreamShutdown)
 			case <-ctx.Done():
-				fl.Cancel(QErrBufferFull)
+				fl.Cancel(QErrStreamBufferFull)
 				fb.config.msink.IncrCounterWithLabels(
 					MetricFlowErr,
 					1.0,

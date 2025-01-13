@@ -664,7 +664,7 @@ func (t *Transport) initialiseOutboundStream(
 	select {
 	case err = <-ack:
 	case <-ctx.Done():
-		stream.SendStream.CancelWrite(QErrCanceled)
+		stream.SendStream.CancelWrite(QErrStreamTimeout)
 		err = ctx.Err()
 	}
 	ackWg.Wait()
@@ -733,7 +733,7 @@ func (t *Transport) initialiseInboundStream(
 		frame = result.fr
 		err = result.err
 	case <-ctx.Done():
-		stream.SendStream.CancelWrite(QErrCanceled)
+		stream.SendStream.CancelWrite(QErrStreamTimeout)
 		err = ctx.Err()
 	}
 	ackWg.Wait()

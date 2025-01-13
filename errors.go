@@ -43,16 +43,16 @@ const (
 	// available.
 	QErrStreamEndpointDoesNotExists = quic.StreamErrorCode(0x4)
 
-	// QErrStreamClosed is sent when a stream is shutting down.
-	QErrStreamClosed = quic.StreamErrorCode(0xC)
+	// QErrStreamShutdown is sent when the peer is shutting down.
+	QErrStreamShutdown = quic.StreamErrorCode(0xD0)
 
-	// QErrBufferFull is returned when an endpoint is not `Accept`-ing
+	// QErrStreamBufferFull is returned when an endpoint is not `Accept`-ing
 	// flow establishment request fast enough, which cause back-pressure.
-	QErrBufferFull = quic.StreamErrorCode(0xBF)
+	QErrStreamBufferFull = quic.StreamErrorCode(0xBF)
 
-	// QErrCanceled is returned when the stream establishement request
-	// has been cancaled by the initiator.
-	QErrCanceled = quic.StreamErrorCode(0xCA)
+	// QErrStreamTimeout is returned when the stream establishement request
+	// has timed out.
+	QErrStreamTimeout = quic.StreamErrorCode(0x10)
 )
 
 var (

@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -88,6 +89,18 @@ func main() {
 		slog.Info("terminating...")
 		cancel(errors.New("user requested shutdown"))
 	}()
+
+	cpuProFile, err := os.Create(*Hostname + ".prof")
+	if err != nil {
+		slog.Error("failed to create cpu profile file", "error", err)
+		os.Exit(3)
+	}
+
+	if err := pprof.StartCPUProfile(cpuProFile); err != nil {
+		slog.Error("failed to start cpu profile", "error", err)
+		os.Exit(3)
+	}
+	defer pprof.StopCPUProfile()
 
 	var wg sync.WaitGroup
 	for i := *From; i < *Until; i++ {

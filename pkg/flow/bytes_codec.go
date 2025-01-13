@@ -2,7 +2,6 @@ package flow
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"reflect"
 
@@ -68,10 +67,7 @@ func (enc BytesCodec) Decode(stream quic.ReceiveStream) (interface{}, error) {
 	for n < len(buf) {
 		m, err := stream.Read(buf[n : n+1])
 		if err != nil {
-			var streamErr *quic.StreamError
-			if errors.As(err, &streamErr) {
-				return nil, err
-			}
+			return nil, err
 		}
 		if m != 0 {
 			byteRead := buf[n]
@@ -93,10 +89,7 @@ func (enc BytesCodec) Decode(stream quic.ReceiveStream) (interface{}, error) {
 	for n < len(buf) {
 		m, err := stream.Read(buf[n:])
 		if err != nil {
-			var streamErr *quic.StreamError
-			if errors.As(err, &streamErr) {
-				return nil, err
-			}
+			return nil, err
 		}
 		n = n + m
 	}

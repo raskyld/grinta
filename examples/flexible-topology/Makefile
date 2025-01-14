@@ -3,6 +3,9 @@ OPENSSL = openssl
 %.key:
 	$(OPENSSL) ecparam -genkey -name prime256v1 -out "$@"
 
+clean:
+	rm *.key *.crt *.prof
+
 ca.crt: ca.key
 	$(OPENSSL) req -new -x509 -days 30 -key "$<" -out "$@" \
 		-subj "/C=FR/L=Paris/O=GrintaLovers/CN=GrintaCA"
@@ -16,7 +19,7 @@ leaf.crt: ca.crt ca.key leaf.key
 
 run-single-node1: ca.crt leaf.crt leaf.key
 	go run . -tls-ca ca.crt -tls-cert leaf.crt -tls-key leaf.key \
-		-hostname "node1" -until 6 -max 5 -port 6001
+		-hostname "node1" -until 16 -max 15 -port 6001
 
 run-cluster-node1: ca.crt leaf.crt leaf.key
 	go run . -tls-ca ca.crt -tls-cert leaf.crt -tls-key leaf.key \

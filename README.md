@@ -16,7 +16,7 @@
   distributed over multiple machines &mdash; capable of establishing
   *flow* :ocean:
 
-## Why? :face_with_raised_eyebrow:
+## Why? :thinking:
 
 Golang Runtime's concurrency model has two major actors:
 * Computational units: *Goroutines*.
@@ -35,6 +35,11 @@ processes (and likely, machines).
 ## How? :star_struck:
 
 See the `examples/` folder.
+
+I think the `flexible-topology` is a good one, it shows you how `grinta` allows
+you to build an app exchanging message concurrently, supporting
+different topology (including distributed one) in ~250 LOC, without any
+external dependencies. :rocket:
 
 ## Features
 

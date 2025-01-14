@@ -110,7 +110,7 @@ func NewTransport(cfg *TransportConfig) (trans *Transport, err error) {
 
 	defer func() {
 		if err != nil {
-			t.Shutdown()
+			_ = t.Shutdown()
 		}
 	}()
 
@@ -392,7 +392,14 @@ func (t *Transport) acceptCx() {
 			break
 		}
 
-		t.handleConn(conn, ServerPerspective)
+		_, err = t.handleConn(conn, ServerPerspective)
+		if err != nil {
+			t.logger.Warn(
+				"failed to handle connection",
+				LabelError.L(err),
+				LabelPeerAddr.L(conn.RemoteAddr().String()),
+			)
+		}
 	}
 }
 

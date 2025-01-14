@@ -149,7 +149,10 @@ func TestFabric(t *testing.T) {
 			64,
 		)
 
-		flowSend.Send(context.Background(), []byte("hello!"))
+		err = flowSend.Send(context.Background(), []byte("hello!"))
+		if !assert.NoError(t, err) {
+			return
+		}
 		val := <-values
 		assert.Equal(t, "hello!", string(val))
 	})
@@ -166,11 +169,14 @@ func TestFabric(t *testing.T) {
 			64,
 		)
 
-		flowSend.Send(context.Background(), []byte("hello remote!"))
+		err = flowSend.Send(context.Background(), []byte("hello remote!"))
+		if !assert.NoError(t, err) {
+			return
+		}
 		val := <-values
 		assert.Equal(t, "hello remote!", string(val))
 	})
 
-	fbNode1.Shutdown()
-	fbNode2.Shutdown()
+	require.NoError(t, fbNode1.Shutdown())
+	require.NoError(t, fbNode2.Shutdown())
 }

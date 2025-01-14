@@ -144,7 +144,10 @@ func (dir *nameDirectory) resolveWithCluster(ctx context.Context, name string) (
 			LabelEndpointName.L(name),
 		)
 		if resp.claim != nil {
-			dir.record(resp.claim, false)
+			err = dir.record(resp.claim, false)
+			if err != nil {
+				dir.logger.Warn("failed to record the result of cluster name resolution", LabelError.L(err))
+			}
 		}
 
 		return resp.Host, resp.claim, nil

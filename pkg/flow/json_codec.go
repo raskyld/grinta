@@ -74,6 +74,6 @@ func (dec JsonDecoder[Msg]) Decode(stream quic.ReceiveStream) (interface{}, erro
 	}
 
 	result := dec.allocator()
-	json.Unmarshal(buf.([]byte), result)
+	err = json.Unmarshal(buf.([]byte), result)
 	return result, err
 }

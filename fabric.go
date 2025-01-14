@@ -195,12 +195,12 @@ func (fb *Fabric) Shutdown() error {
 	fb.epGCWriter.Wait()
 
 	fb.logger.Info("shutdown: leave cluster")
-	fb.serf.Leave()
+	_ = fb.serf.Leave()
 
 	// Phase 2: Drop all resources.
 	close(fb.dropCh)
 	fb.logger.Info("shutdown: release gossip resources")
-	fb.serf.Shutdown()
+	_ = fb.serf.Shutdown()
 	fb.dir.close()
 
 	fb.logger.Info("shutdown: wait for sub-tasks to finish")
@@ -247,7 +247,10 @@ func (fb *Fabric) handleEvents() {
 				if err != nil {
 					fb.logger.Error("failed to unmarshal an event", LabelError.L(err))
 				} else {
-					fb.dir.record(record, false)
+					err = fb.dir.record(record, false)
+					if err != nil {
+						fb.logger.Error("failed to record name change", LabelError.L(err))
+					}
 				}
 			default:
 				fb.logger.Error("received unexpected event", "event_name", event.Name)
@@ -352,7 +355,10 @@ func (fb *Fabric) handleEndpointGC() {
 			fb.lk.Lock()
 			for _, ep := range fb.localEPs {
 				ep.close(true)
-				fb.gcEndpoint(ep)
+				err := fb.gcEndpoint(ep)
+				if err != nil {
+					fb.logger.Warn("failed to announce endpoint shutdown", LabelError.L(err))
+				}
 			}
 			close(fb.epGC)
 			fb.lk.Unlock()
@@ -360,7 +366,10 @@ func (fb *Fabric) handleEndpointGC() {
 		}
 
 		fb.lk.Lock()
-		fb.gcEndpoint(ep)
+		err := fb.gcEndpoint(ep)
+		if err != nil {
+			fb.logger.Warn("failed to announce endpoint shutdown", LabelError.L(err))
+		}
 		fb.lk.Unlock()
 	}
 }

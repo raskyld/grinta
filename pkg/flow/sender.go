@@ -108,7 +108,7 @@ func (w *Sender[T]) run() {
 
 		err := w.raw.Send(w.enc, msg)
 		if err != nil {
-			w.closeWith(err)
+			_ = w.closeWith(err)
 			return
 		}
 	}

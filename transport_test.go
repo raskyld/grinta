@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-metrics"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -178,7 +179,8 @@ func TestNewTransport(t *testing.T) {
 		t.Fatalf("failed to start node1: %s", err)
 		return
 	}
-	ts1.FinalAdvertiseAddr("", 0)
+	_, _, err = ts1.FinalAdvertiseAddr("", 0)
+	require.NoError(t, err)
 
 	ts2, err := NewTransport(&TransportConfig{
 		TlsConfig:  tcN2,
@@ -191,7 +193,8 @@ func TestNewTransport(t *testing.T) {
 		t.Fatalf("failed to start node2: %s", err)
 		return
 	}
-	ts2.FinalAdvertiseAddr("", 0)
+	_, _, err = ts2.FinalAdvertiseAddr("", 0)
+	require.NoError(t, err)
 
 	t.Run("write datagram from n1 to n2", func(t *testing.T) {
 		_, err = ts1.WriteTo([]byte("hello"), "localhost:6042")
@@ -212,25 +215,40 @@ func TestNewTransport(t *testing.T) {
 		ts := time.Now()
 		conn, err := ts2.DialTimeout("localhost:6041", 10*time.Second)
 		ts2 := time.Now()
-		require.NoError(t, err)
+		if !assert.NoError(t, err) {
+			return
+		}
 		t.Logf("dialing took %s", ts2.Sub(ts).String())
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 		select {
 		case stream := <-ts1.StreamCh():
 			t.Logf("stream found from n1")
-			conn.Write([]byte("a"))
-			conn.Write([]byte("b"))
-			conn.Write([]byte("c"))
+			_, err = conn.Write([]byte("a"))
+			if !assert.NoError(t, err) {
+				return
+			}
+			_, err = conn.Write([]byte("b"))
+			if !assert.NoError(t, err) {
+				return
+			}
+			_, err = conn.Write([]byte("c"))
+			if !assert.NoError(t, err) {
+				return
+			}
 
 			var n int
 			var hasAppended bool
 			buf := make([]byte, 1500)
-			require.Eventually(t, func() bool {
+			assert.Eventually(t, func() bool {
 				m, err := readStreamSkipEmpty(t, ctx, stream, buf[n:])
 				n = m + n
 				if !hasAppended {
-					conn.Write([]byte("d"))
+					_, err = conn.Write([]byte("d"))
+					if !assert.NoError(t, err) {
+						return false
+					}
 					hasAppended = true
 				}
 				current := string(buf[:n])
@@ -240,17 +258,16 @@ func TestNewTransport(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatalf("timed out")
 		}
-		cancel()
 	})
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
-		ts1.Shutdown()
+		assert.NoError(t, ts1.Shutdown())
 		wg.Done()
 	}()
 	go func() {
-		ts2.Shutdown()
+		assert.NoError(t, ts2.Shutdown())
 		wg.Done()
 	}()
 	wg.Wait()
@@ -261,7 +278,7 @@ func readStreamSkipEmpty(t *testing.T, ctx context.Context, stream net.Conn, buf
 	var err error
 	dl, ok := ctx.Deadline()
 	if ok {
-		stream.SetReadDeadline(dl)
+		require.NoError(t, stream.SetReadDeadline(dl))
 	}
 
 	for {

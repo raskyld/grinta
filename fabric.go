@@ -225,6 +225,11 @@ func (fb *Fabric) handleEvents() {
 		case serf.MemberEvent:
 			if event.Type == serf.EventMemberJoin {
 				for _, member := range event.Members {
+					fb.logger.Info(
+						"node joined",
+						LabelPeerName.L(member.Name),
+						LabelPeerAddr.L(fmt.Sprintf("%s:%d", member.Addr, member.Port)),
+					)
 					fb.dir.markAlive(member.Name)
 				}
 			}

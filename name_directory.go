@@ -67,13 +67,19 @@ func newNameDir(logger *slog.Logger, fabric FabricControlPlane, localNodeName st
 
 func (dir *nameDirectory) markDead(name string) {
 	dir.deadLk.Lock()
-	dir.deadNodes[name] = true
+	if !dir.deadNodes[name] {
+		dir.logger.Warn("node marked dead", LabelPeerName.L(name))
+		dir.deadNodes[name] = true
+	}
 	dir.deadLk.Unlock()
 }
 
 func (dir *nameDirectory) markAlive(name string) {
 	dir.deadLk.Lock()
-	delete(dir.deadNodes, name)
+	if dir.deadNodes[name] {
+		dir.logger.Info("node marked alive again", LabelPeerName.L(name))
+		delete(dir.deadNodes, name)
+	}
 	dir.deadLk.Unlock()
 }
 

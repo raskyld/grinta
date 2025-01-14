@@ -19,6 +19,10 @@ type nameDirectory struct {
 	lk      sync.RWMutex
 	closeCh chan struct{}
 
+	// handle dead nodes
+	deadNodes map[string]bool
+	deadLk    sync.Mutex
+
 	// a local monotonic clock to order our local changes.
 	clock uint64
 
@@ -50,6 +54,7 @@ func newNameDir(logger *slog.Logger, fabric FabricControlPlane, localNodeName st
 		conflictTimeout: 10 * time.Second,
 		conflictTicker:  time.NewTicker(1 * time.Second),
 		closeCh:         make(chan struct{}, 1),
+		deadNodes:       make(map[string]bool),
 		fb:              fabric,
 		localNodeName:   localNodeName,
 	}
@@ -60,16 +65,41 @@ func newNameDir(logger *slog.Logger, fabric FabricControlPlane, localNodeName st
 	return dir
 }
 
+func (dir *nameDirectory) markDead(name string) {
+	dir.deadLk.Lock()
+	dir.deadNodes[name] = true
+	dir.deadLk.Unlock()
+}
+
+func (dir *nameDirectory) markAlive(name string) {
+	dir.deadLk.Lock()
+	delete(dir.deadNodes, name)
+	dir.deadLk.Unlock()
+}
+
 func (dir *nameDirectory) resolve(name string) (string, *grintav1alpha1.NameClaim, error) {
-	dir.lk.RLock()
-	defer dir.lk.RUnlock()
+	dir.lk.Lock()
+	defer dir.lk.Unlock()
+
 	currentNode, has := dir.d.Get(name)
 	if !has {
 		return "", nil, ErrNameResolution
 	}
 
 	if len(currentNode.owner) > 0 {
-		return currentNode.owner, currentNode.history[currentNode.owner], nil
+		dir.deadLk.Lock()
+		defer dir.deadLk.Unlock()
+		if dir.deadNodes[currentNode.owner] {
+			dir.logger.Warn(
+				"endpoint unclaimed since it was hosted by a dead node",
+				LabelPeerName.L(currentNode.owner),
+				LabelEndpointName.L(name),
+			)
+			currentNode.owner = ""
+			return "", nil, ErrNameResolution
+		} else {
+			return currentNode.owner, currentNode.history[currentNode.owner], nil
+		}
 	}
 
 	return "", nil, ErrNameResolution
@@ -189,6 +219,7 @@ func (dir *nameDirectory) record(claim *grintav1alpha1.NameClaim, synchronous bo
 				LabelEndpointName.L(claim.GetEndpointName()),
 				LabelPeerName.L(claim.GetNodeName()),
 			)
+			return nil
 		}
 
 		// Idempotency rule: You MAY claim a name you already own.
@@ -197,6 +228,20 @@ func (dir *nameDirectory) record(claim *grintav1alpha1.NameClaim, synchronous bo
 		}
 
 		// At this point, we have a conflict.
+
+		// If the current owner is dead, we can re-claim.
+		dir.deadLk.Lock()
+		if dir.deadNodes[currentNode.owner] {
+			dir.deadLk.Unlock()
+			currentNode.owner = claim.GetNodeName()
+			dir.logger.Debug(
+				"re-claimed dead node endpoint name",
+				LabelEndpointName.L(claim.GetEndpointName()),
+				LabelPeerName.L(claim.GetNodeName()),
+			)
+			return nil
+		}
+		dir.deadLk.Unlock()
 
 		// If we are in synchronous mode, we can just abort.
 		if synchronous {

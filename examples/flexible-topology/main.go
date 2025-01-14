@@ -116,7 +116,7 @@ func main() {
 func startMicroprocessWrite(ctx context.Context, fb *grinta.Fabric, wg *sync.WaitGroup, id int) {
 	defer wg.Done()
 	flows := make(map[string]*flow.Sender[*msg])
-	ticker := time.NewTicker(time.Duration(rand.IntN(4)+1) * time.Second)
+	ticker := time.NewTicker(time.Duration(rand.IntN(10)+1) * time.Second)
 	for {
 		select {
 		case <-ticker.C:

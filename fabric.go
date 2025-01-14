@@ -223,7 +223,17 @@ func (fb *Fabric) handleEvents() {
 
 		switch event := event.(type) {
 		case serf.MemberEvent:
+			if event.Type == serf.EventMemberJoin {
+				for _, member := range event.Members {
+					fb.dir.markAlive(member.Name)
+				}
+			}
 
+			if event.Type == serf.EventMemberFailed {
+				for _, member := range event.Members {
+					fb.dir.markDead(member.Name)
+				}
+			}
 		case serf.UserEvent:
 			switch event.Name {
 			case "name_record":

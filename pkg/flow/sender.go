@@ -87,12 +87,13 @@ func (w *Sender[T]) Close() error {
 
 func (w *Sender[T]) closeWith(cause error) error {
 	w.lk.Lock()
-	defer w.lk.Unlock()
 	if w.err != nil {
+		w.lk.Unlock()
 		return nil
 	}
 	w.err = cause
 	close(w.closeCh)
+	w.lk.Unlock()
 	w.writer.Wait()
 	close(w.writeCh)
 	return w.raw.Close()

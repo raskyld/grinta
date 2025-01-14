@@ -74,15 +74,22 @@ func (r *Receiver[T]) Recv(ctx context.Context) (result T, err error) {
 }
 
 func (r *Receiver[T]) Close() error {
+	return r.closeWith(ErrFlowClosed, true)
+}
+
+func (r *Receiver[T]) closeWith(cause error, mustWait bool) error {
 	r.lk.Lock()
-	defer r.lk.Unlock()
 	if r.err != nil {
+		r.lk.Unlock()
 		return nil
 	}
-	r.err = ErrFlowClosed
+	r.err = cause
 	close(r.closeCh)
 	err := r.raw.Close()
-	r.mainLoopWg.Wait()
+	r.lk.Unlock()
+	if mustWait {
+		r.mainLoopWg.Wait()
+	}
 	close(r.readCh)
 	return err
 }
@@ -92,12 +99,7 @@ func (r *Receiver[T]) run() {
 	for {
 		elem, err := r.raw.Recv(r.dec)
 		if err != nil {
-			r.lk.Lock()
-			r.err = err
-			close(r.closeCh)
-			close(r.readCh)
-			r.raw.Close()
-			r.lk.Unlock()
+			_ = r.closeWith(err, false)
 			return
 		}
 

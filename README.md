@@ -12,10 +12,9 @@
 > **NOT production ready**. :pray:
 
 * *Goroutines* hold an *Endpoint* :round_pushpin: on which they can listen
-  for inbound *Flow* :ocean: establishment requests :ocean:
+  for inbound *Flow* :ocean: establishment requests
 * *Flows* :ocean: are bidirectional communication chanel between
   a *client* and an *Endpoint* :round_pushpin:
-* *Endpoints* :round_pushpin: are *named* listeners exposed on a *fabric* :link: 
 * *Fabrics* :link: are meshes of Golang processes &mdash; potentially
   distributed over multiple machines &mdash; capable of establishing
   *flow* :ocean:

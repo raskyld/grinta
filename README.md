@@ -32,14 +32,18 @@ multiplexed stream fabric.
 
 ## Features
 
-* **Simple API**: `Fabric` -> `Endpoint` -> `Flow` describes an intuitive
+* :relieved: **Simple API**: `Fabric` -> `Endpoint` -> `Flow` describes an intuitive
   hierarchy and their APIs are kept minimal.
-* **Golang Focused**: By focusing on a single language, we remove a lot of
+* :writing_hand: **Built-in Codec**: We already support:
+  * Protobuf,
+  * JSON,
+  * Raw Bytes,
+* :pinching_hand: **Golang Focused**: By focusing on a single language, we remove a lot of
   complexity and can optimise for just our specific use-case.
-* **No Central Authority**: A `grinta` cluster has no central authority, no
+* :family: **No Central Authority**: A `grinta` cluster has no central authority, no
   strongly consistent consensus protocol, nodes collaborate together to
   converge as fast as possible.
-* **GRINTA Protocol**: A custom protocol made on top of:
+* :sunglasses: **GRINTA Protocol**: A custom protocol made on top of:
   * a first *QUIC Transport Layer* supporting multiplexed inter-node
     bidirectional **streams** and lightweight **datagrams**, 
   * an implementation of the ["SWIM"][swim] gossip protocol:

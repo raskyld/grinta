@@ -21,6 +21,26 @@ const MaxReasonBytes = 255
 
 var InvalidEndpointName = regexp.MustCompile(`[^A-Za-z0-9\-\.]+`)
 
+// Fabric is the top-level API of this package.
+//
+// It represents a network of Golang processes, capable of
+// clustering together without a central authority using the SWIM
+// gossip protocol on top of QUIC.
+//
+// With a Fabric, you can allocate [Endpoint]s which will
+// be exposed to all members of the Fabric under of a simple
+// string name.
+//
+// Peers can [Fabric.DialEndpoint] using this name to establish
+// a [flow.RawSender], to send messages. If bidirectional communication
+// is needed, they can use [Fabric.DialEndpointBidi] instead to get a
+// [flow.Raw].
+//
+// `Raw` variants should not be used directly, instead, the `flow`
+// package provides strongly typed versions: [flow.Sender] and [flow.Receiver].
+//
+// Use [Create] to bootstrap your Fabric. Then, to actually join other nodes,
+// you must call [Fabric.JoinCluster].
 type Fabric struct {
 	config config
 	logger *slog.Logger

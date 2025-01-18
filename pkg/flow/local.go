@@ -25,7 +25,7 @@ func (fl *LocalFlow) Recv(_ Decoder) (interface{}, error) {
 	return elem, nil
 }
 
-func (fl *LocalFlow) Send(_ Encoder, msg interface{}) error {
+func (fl *LocalFlow) Send(encoder Encoder, msg interface{}) error {
 	fl.lk.Lock()
 	if fl.closed {
 		fl.lk.Unlock()
@@ -35,8 +35,13 @@ func (fl *LocalFlow) Send(_ Encoder, msg interface{}) error {
 	defer fl.wg.Done()
 	fl.lk.Unlock()
 
+	toSend, err := encoder.ProcessLocal(msg)
+	if err != nil {
+		return err
+	}
+
 	select {
-	case fl.data <- msg:
+	case fl.data <- toSend:
 		return nil
 	case <-fl.closeCh:
 		return ErrFlowClosed

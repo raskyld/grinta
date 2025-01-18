@@ -11,6 +11,8 @@ import (
 // only be used by power users.
 //
 // Methods MUST NOT be called concurrently.
+//
+// Wrap it in a [Sender] using [NewSender] for a better DX.
 type RawSender interface {
 	Send(Encoder, interface{}) error
 	Close() error

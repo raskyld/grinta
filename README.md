@@ -7,6 +7,10 @@
   </p>
 </div>
 
+> **N.B.** This is a *Proof Of Concept* library I built as a side-project
+> over the last month to fulfill the needs I have for another project, it is
+> **NOT production ready**. :pray:
+
 * *Goroutines* hold an *Endpoint* :round_pushpin: on which they can listen
   for inbound *Flow* :ocean: establishment requests :ocean:
 * *Flows* :ocean: are bidirectional communication chanel between

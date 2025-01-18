@@ -8,7 +8,7 @@
 </div>
 
 * *Goroutines* hold an *Endpoint* :round_pushpin: on which they can listen
-  for inbound *Flow* establishment requests :ocean:
+  for inbound *Flow* :ocean: establishment requests :ocean:
 * *Flows* :ocean: are bidirectional communication chanel between
   a *client* and an *Endpoint* :round_pushpin:
 * *Endpoints* :round_pushpin: are *named* listeners exposed on a *fabric* :link: 
@@ -16,12 +16,19 @@
   distributed over multiple machines &mdash; capable of establishing
   *flow* :ocean:
 
-## Usage
+## Demo
+
+This video shows the [`examples/hello-world`](examples/hello-world/) example.
+
+First, both goroutines are on the same node and can communicate using a
+*Flow* :ocean: anyway, behind the scene `grinta` use native Go `chan`.
+
+Then, we run **the same binary** but this time, we put each goroutine in a
+different process. From a code point of view, nothing change for the goroutines,
+they still use a *Flow* :ocean: but this time, `grinta` uses a QUIC inter-node
+multiplexed stream fabric.
 
 [hello world example](https://github.com/user-attachments/assets/24064e25-3eda-4153-adfc-de16f57423cb)
-
-
-See [`examples/hello-world`](examples/hello-world/).
 
 ## Features
 

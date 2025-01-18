@@ -16,30 +16,11 @@
   distributed over multiple machines &mdash; capable of establishing
   *flow* :ocean:
 
-## Why? :thinking:
+## Usage
 
-Golang Runtime's concurrency model has two major actors:
-* Computational units: *Goroutines*.
-* Communication primitives: *Channels*. 
+TODO: Demo.
 
-They have one obvious limitation: they can only be used **inside of the same
-process**.
-
-Your software may scale to the point it cannot run in a single
-process anymore, you now have *Goroutines* spread in different
-processes (and likely, machines).
-
-`grinta` aims to generalise those actors, so they can be ported to a
-*distributed* environment with **zero rewriting**.
-
-## How? :star_struck:
-
-See the `examples/` folder.
-
-I think the `flexible-topology` is a good one, it shows you how `grinta` allows
-you to build an app exchanging message concurrently, supporting
-different topology (including distributed one) in ~250 LOC, without any
-external dependencies. :rocket:
+See [`examples/hello-world`](examples/hello-world/).
 
 ## Features
 

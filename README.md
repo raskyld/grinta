@@ -18,7 +18,8 @@
 
 ## Usage
 
-TODO: Demo.
+[hello world example](https://github.com/user-attachments/assets/24064e25-3eda-4153-adfc-de16f57423cb)
+
 
 See [`examples/hello-world`](examples/hello-world/).
 
